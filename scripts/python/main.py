@@ -1851,8 +1851,46 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                     release_index_lock(search_index_id)
                     log_print(f"   🔓 Released lock for index {search_index_id} (after error)")
                     log_print(f"\n❌ Step 1 Failed: {str(e)}")
-                    log_print("   Continuing to test current index state anyway...")
-                    # Don't save state on failure - allows retry
+                    
+                    # Progress callback - report error
+                    if progress_callback:
+                        try:
+                            error_msg = f"Step 1 Failed: {str(e)}"
+                            if "Executable doesn't exist" in str(e) or "BrowserType.launch" in str(e):
+                                error_msg = "Step 1 Failed: Playwright browser not installed. Cannot update search index. Please ensure browsers are installed."
+                            elif "playwright install" in str(e).lower():
+                                error_msg = "Step 1 Failed: Playwright browser installation required. Run 'playwright install chromium' to fix."
+                            progress_callback({'status': 'error', 'cycle': cycle_number, 'step': 1, 'run_id': run_id, 'message': error_msg, 'error': str(e)})
+                        except:
+                            pass
+                    
+                    log_print("\n❌ CRITICAL ERROR: Step 1 (Search Index Update) failed.")
+                    log_print("❌ The workflow cannot continue without successfully updating the search index.")
+                    log_print("❌ This is a critical step and cannot be skipped.")
+                    log_print(f"❌ Error details: {str(e)}")
+                    log_print("\n💡 Possible solutions:")
+                    log_print("   1. Ensure Playwright browsers are installed: 'playwright install chromium'")
+                    log_print("   2. Check network connectivity to Salesforce")
+                    log_print("   3. Verify search index ID and credentials are correct")
+                    log_print("   4. Review the full error message above for specific issues")
+                    
+                    # Save error state
+                    save_state(
+                        cycle_number=cycle_number,
+                        last_completed_step=0,  # No steps completed
+                        sheet_name=None,
+                        refinement_stage=refinement_stage,
+                        stage_status='error',
+                        proposed_llm_parser_prompt=None,
+                        proposed_response_prompt=None,
+                        stage_complete_reason=f"Step 1 failed: {str(e)}",
+                        excel_file=excel_file,
+                        run_id=run_id,
+                        yaml_config_snapshot=yaml_config
+                    )
+                    
+                    # Stop the workflow - don't continue
+                    raise RuntimeError(f"Step 1 (Search Index Update) failed: {str(e)}. Workflow stopped.")
             else:
                 log_print("\n" + "-"*80)
                 log_print(f"STEP 1: SKIPPED (Current refinement stage is '{refinement_stage}', not 'llm_parser')")

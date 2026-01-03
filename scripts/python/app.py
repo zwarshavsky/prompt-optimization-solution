@@ -581,6 +581,19 @@ def progress_callback(status_dict):
                 message = f'Workflow Complete! Completed {cycle} cycle(s)'
                 if stage_status:
                     message += f' (Final Stage Status: {stage_status})'
+            elif status == 'error':
+                # Handle error status - critical failures
+                error_msg = status_dict.get('message', status_dict.get('error', 'Unknown error'))
+                error_details = status_dict.get('error', '')
+                if error_details and error_details != error_msg:
+                    message = f'❌ ERROR: {error_msg} (Details: {error_details})'
+                else:
+                    message = f'❌ ERROR: {error_msg}'
+                # Mark run as failed
+                run['status'] = 'failed'
+                run['error'] = error_msg
+                if error_details:
+                    run['error_details'] = error_details
             else:
                 # Use provided message or generate one
                 message = status_dict.get('message', f'Status: {status}')
@@ -1656,7 +1669,7 @@ elif page == "Jobs":
     # Filter options
     filter_option = st.radio(
         "Filter:",
-        ["All", "Running", "Completed"],
+        ["All", "Running", "Completed", "Failed"],
         horizontal=True,
         key="jobs_filter"
     )
@@ -1725,6 +1738,9 @@ elif page == "Jobs":
         elif filter_option == "Completed":
             if r['status'] == 'completed':
                 filtered_runs.append(r)
+        elif filter_option == "Failed":
+            if r['status'] == 'failed':
+                filtered_runs.append(r)
     
     # Sort by started_at (newest first)
     filtered_runs.sort(key=lambda x: x.get('started_at', ''), reverse=True)
@@ -1735,6 +1751,12 @@ elif page == "Jobs":
             """Extract data for table row display"""
             run_id = run['run_id']
             status = run.get('status', 'unknown')
+            
+            # Get config info
+            config = run.get('config', {})
+            configuration = config.get('configuration', {})
+            search_index_id = configuration.get('searchIndexId', 'N/A')
+            prompt_template_name = configuration.get('promptTemplateApiName', 'N/A')
             
             # Format timestamps
             started_at = run.get('started_at', 'N/A')
@@ -1754,8 +1776,18 @@ elif page == "Jobs":
                 completed_at_str = 'In Progress' if status == 'running' else 'N/A'
             
             # Status icon and label
-            status_icon = "Running" if status == 'running' else "Complete" if status == 'completed' else "Error"
-            status_label = "Running" if status == 'running' else "Completed" if status == 'completed' else "Unknown"
+            if status == 'running':
+                status_icon = "🔄"
+                status_label = "Running"
+            elif status == 'completed':
+                status_icon = "✅"
+                status_label = "Completed"
+            elif status == 'failed':
+                status_icon = "❌"
+                status_label = "Failed"
+            else:
+                status_icon = "❓"
+                status_label = "Unknown"
             
             # Get current step info for running jobs
             progress = run.get('progress', {})
@@ -1813,6 +1845,8 @@ elif page == "Jobs":
                 'completed_at': completed_at_str,
                 'current_step': current_step_display,
                 'excel': excel_display,
+                'search_index_id': search_index_id,
+                'prompt_template_name': prompt_template_name,
                 'run': run  # Keep reference to full run object
             }
         
@@ -1825,7 +1859,7 @@ elif page == "Jobs":
         st.markdown("")
         
         # Table header
-        col1, col2, col3, col4, col5, col6 = st.columns([2, 1.5, 1.5, 1.5, 2.5, 1])
+        col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([2, 1.5, 1.5, 1.5, 2, 2, 2.5, 1])
         with col1:
             st.markdown("**Run ID**")
         with col2:
@@ -1835,8 +1869,12 @@ elif page == "Jobs":
         with col4:
             st.markdown("**Completed**")
         with col5:
-            st.markdown("**Current Step**")
+            st.markdown("**Search Index ID**")
         with col6:
+            st.markdown("**Prompt Builder**")
+        with col7:
+            st.markdown("**Current Step**")
+        with col8:
             st.markdown("**Excel**")
         
         st.markdown("---")
@@ -1847,7 +1885,7 @@ elif page == "Jobs":
             run_id = row_data['run_id']
             
             # Table row
-            col1, col2, col3, col4, col5, col6 = st.columns([2, 1.5, 1.5, 1.5, 2.5, 1])
+            col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([2, 1.5, 1.5, 1.5, 2, 2, 2.5, 1])
             with col1:
                 st.markdown(f"`{run_id}`")
             with col2:
@@ -1857,8 +1895,12 @@ elif page == "Jobs":
             with col4:
                 st.markdown(row_data['completed_at'])
             with col5:
-                st.markdown(row_data['current_step'])
+                st.markdown(f"`{row_data['search_index_id']}`")
             with col6:
+                st.markdown(f"`{row_data['prompt_template_name']}`")
+            with col7:
+                st.markdown(row_data['current_step'])
+            with col8:
                 st.markdown(row_data['excel'])
             
             # Expandable details section
@@ -1990,17 +2032,37 @@ elif page == "Jobs":
                 job_status = run.get('status', 'unknown')
                 is_completed = job_complete or job_status == 'completed' or status_text == "Workflow Complete!"
                 
+                # Check if job failed
+                job_status = run.get('status', 'unknown')
+                is_failed = job_status == 'failed'
+                error_msg = run.get('error', '')
+                error_details = run.get('error_details', '')
+                
                 # Show run info
                 col1, col2 = st.columns([3, 1])
                 with col1:
                     st.markdown(f"**Run ID:** `{run_id}`")
                     st.markdown(f"**Job Type:** 🤖 {stage_name} Refinement Job")
-                    st.markdown(f"**Status:** {status_icon} {status_text}")
-                    if status_message:
-                        st.info(f"📝 {status_message}")
-                    # Only show stage status if job is not complete
-                    if stage_status and not is_completed:
-                        st.success(f"📊 Stage Status: {stage_status}")
+                    
+                    # Show error prominently if failed
+                    if is_failed:
+                        st.error(f"**Status:** ❌ **FAILED**")
+                        if error_msg:
+                            st.error(f"**Error:** {error_msg}")
+                        if error_details and error_details != error_msg:
+                            st.error(f"**Error Details:** {error_details}")
+                        # Show which step failed if available
+                        if progress.get('step'):
+                            failed_step = progress.get('step')
+                            step_name = step_names.get(failed_step, f'Step {failed_step}')
+                            st.error(f"**Failed at:** Cycle {current_cycle} - {step_name}")
+                    else:
+                        st.markdown(f"**Status:** {status_icon} {status_text}")
+                        if status_message:
+                            st.info(f"📝 {status_message}")
+                        # Only show stage status if job is not complete
+                        if stage_status and not is_completed:
+                            st.success(f"📊 Stage Status: {stage_status}")
                 with col2:
                     if current_cycle > 0:
                         progress_value = min(current_cycle / 10, 1.0)
