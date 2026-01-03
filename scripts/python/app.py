@@ -48,8 +48,78 @@ def get_config_dir():
     config_dir.mkdir(exist_ok=True)
     return config_dir
 
-# Path to store runs data (relative to script)
+# Path to store runs data (relative to script) - fallback for local development
 RUNS_DATA_FILE = get_app_data_dir() / "runs_data.json"
+
+def get_db_connection():
+    """Get PostgreSQL database connection from Heroku DATABASE_URL"""
+    try:
+        import psycopg2
+    except ImportError:
+        return None
+    
+    database_url = os.environ.get('DATABASE_URL')
+    if not database_url:
+        return None
+    
+    # Parse DATABASE_URL (format: postgres://user:password@host:port/database)
+    # Heroku uses postgres:// but psycopg2 needs postgresql://
+    if database_url.startswith('postgres://'):
+        database_url = database_url.replace('postgres://', 'postgresql://', 1)
+    
+    try:
+        conn = psycopg2.connect(database_url, sslmode='require')
+        return conn
+    except Exception as e:
+        print(f"Warning: Could not connect to database: {e}")
+        return None
+
+def init_database():
+    """Initialize database table if it doesn't exist"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        with conn.cursor() as cur:
+            # Create runs table if it doesn't exist
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS runs (
+                    run_id VARCHAR(255) PRIMARY KEY,
+                    status VARCHAR(50) NOT NULL,
+                    config JSONB,
+                    progress JSONB,
+                    output_lines JSONB,
+                    results JSONB,
+                    error TEXT,
+                    error_details TEXT,
+                    excel_file_path TEXT,
+                    excel_file_content BYTEA,
+                    started_at TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Create index on status for faster filtering
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)
+            """)
+            
+            # Create index on started_at for sorting
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC)
+            """)
+            
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error initializing database: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
 
 def serialize_datetime(obj: Any) -> str:
     """Convert datetime objects to ISO format strings for JSON serialization"""
@@ -67,8 +137,125 @@ def deserialize_datetime(obj: Dict) -> Dict:
                 pass
     return obj
 
+def save_excel_to_db(run_id: str, excel_file_path: str) -> bool:
+    """Save Excel file content to Postgres database"""
+    if not os.path.exists(excel_file_path):
+        return False
+    
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        import psycopg2
+        
+        with open(excel_file_path, 'rb') as f:
+            excel_content = f.read()
+        
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE runs 
+                SET excel_file_path = %s, excel_file_content = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE run_id = %s
+            """, (excel_file_path, psycopg2.Binary(excel_content), run_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error saving Excel file to database: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def load_excel_from_db(run_id: str, output_path: str = None) -> str:
+    """Load Excel file from Postgres database and save to filesystem"""
+    conn = get_db_connection()
+    if not conn:
+        return None
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT excel_file_path, excel_file_content 
+                FROM runs 
+                WHERE run_id = %s AND excel_file_content IS NOT NULL
+            """, (run_id,))
+            
+            row = cur.fetchone()
+            if not row:
+                return None
+            
+            stored_path, excel_content = row
+            
+            # If no output path specified, use the stored path or create in app_data/outputs
+            if not output_path:
+                if stored_path and os.path.exists(stored_path):
+                    return stored_path
+                # Create path in app_data/outputs
+                outputs_dir = get_app_data_dir() / "outputs"
+                outputs_dir.mkdir(exist_ok=True)
+                output_path = outputs_dir / f"run_{run_id}.xlsx"
+            else:
+                output_path = Path(output_path)
+            
+            # Ensure directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Write Excel file to filesystem
+            with open(output_path, 'wb') as f:
+                f.write(excel_content)
+            
+            return str(output_path)
+    except Exception as e:
+        print(f"Error loading Excel file from database: {e}")
+        return None
+    finally:
+        conn.close()
+
 def load_runs() -> List[Dict]:
-    """Load runs from persistent storage"""
+    """Load runs from persistent storage (Postgres or JSON fallback)"""
+    # Try Postgres first
+    conn = get_db_connection()
+    if conn:
+        try:
+            # Initialize database if needed
+            init_database()
+            
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT run_id, status, config, progress, output_lines, 
+                           results, error, error_details, excel_file_path, started_at, completed_at
+                    FROM runs
+                    ORDER BY started_at DESC
+                """)
+                
+                runs = []
+                for row in cur.fetchall():
+                    run = {
+                        'run_id': row[0],
+                        'status': row[1],
+                        'config': row[2] if row[2] else {},
+                        'progress': row[3] if row[3] else {},
+                        'output_lines': row[4] if row[4] else [],
+                        'results': row[5] if row[5] else {},
+                        'error': row[6],
+                        'error_details': row[7],
+                        'excel_file_path': row[8],
+                        'started_at': row[9],
+                        'completed_at': row[10]
+                    }
+                    # Convert datetime strings to datetime objects
+                    deserialize_datetime(run)
+                    runs.append(run)
+                
+                return runs
+        except Exception as e:
+            print(f"Error loading runs from database: {e}")
+            # Fall through to JSON fallback
+        finally:
+            conn.close()
+    
+    # Fallback to JSON file (for local development)
     if RUNS_DATA_FILE.exists():
         try:
             with open(RUNS_DATA_FILE, 'r') as f:
@@ -78,12 +265,84 @@ def load_runs() -> List[Dict]:
                     deserialize_datetime(run)
                 return runs_data
         except Exception as e:
-            st.error(f"Error loading runs data: {e}")
+            print(f"Error loading runs from JSON file: {e}")
             return []
     return []
 
 def save_runs(runs: List[Dict]) -> None:
-    """Save runs to persistent storage"""
+    """Save runs to persistent storage (Postgres or JSON fallback)"""
+    # Try Postgres first
+    conn = get_db_connection()
+    if conn:
+        try:
+            # Initialize database if needed
+            init_database()
+            
+            with conn.cursor() as cur:
+                for run in runs:
+                    # Convert datetime objects to strings for JSONB storage
+                    run_copy = run.copy()
+                    started_at = run_copy.get('started_at')
+                    completed_at = run_copy.get('completed_at')
+                    excel_file_path = run_copy.get('excel_file_path') or run_copy.get('results', {}).get('excel_file', '')
+                    
+                    if isinstance(started_at, datetime):
+                        started_at = started_at.isoformat()
+                    if isinstance(completed_at, datetime):
+                        completed_at = completed_at.isoformat()
+                    
+                    # Use INSERT ... ON CONFLICT to update existing runs
+                    cur.execute("""
+                        INSERT INTO runs (
+                            run_id, status, config, progress, output_lines,
+                            results, error, error_details, excel_file_path, started_at, completed_at, updated_at
+                        ) VALUES (
+                            %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
+                            %s::jsonb, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP
+                        )
+                        ON CONFLICT (run_id) DO UPDATE SET
+                            status = EXCLUDED.status,
+                            config = EXCLUDED.config,
+                            progress = EXCLUDED.progress,
+                            output_lines = EXCLUDED.output_lines,
+                            results = EXCLUDED.results,
+                            error = EXCLUDED.error,
+                            error_details = EXCLUDED.error_details,
+                            excel_file_path = EXCLUDED.excel_file_path,
+                            started_at = EXCLUDED.started_at,
+                            completed_at = EXCLUDED.completed_at,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (
+                        run_copy.get('run_id'),
+                        run_copy.get('status', 'unknown'),
+                        json.dumps(run_copy.get('config', {})),
+                        json.dumps(run_copy.get('progress', {})),
+                        json.dumps(run_copy.get('output_lines', [])),
+                        json.dumps(run_copy.get('results', {})),
+                        run_copy.get('error'),
+                        run_copy.get('error_details'),
+                        excel_file_path,
+                        started_at,
+                        completed_at
+                    ))
+                
+                conn.commit()
+                
+                # Save Excel files to database if they exist
+                for run in runs:
+                    excel_file_path = run.get('excel_file_path') or run.get('results', {}).get('excel_file', '')
+                    if excel_file_path and os.path.exists(excel_file_path):
+                        save_excel_to_db(run.get('run_id'), excel_file_path)
+                
+                return
+        except Exception as e:
+            print(f"Error saving runs to database: {e}")
+            conn.rollback()
+            # Fall through to JSON fallback
+        finally:
+            conn.close()
+    
+    # Fallback to JSON file (for local development)
     try:
         # Ensure directory exists
         RUNS_DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -100,7 +359,7 @@ def save_runs(runs: List[Dict]) -> None:
         with open(RUNS_DATA_FILE, 'w') as f:
             json.dump(runs_to_save, f, indent=2, default=serialize_datetime)
     except Exception as e:
-        st.error(f"Error saving runs data: {e}")
+        print(f"Error saving runs to JSON file: {e}")
 
 # Page configuration
 st.set_page_config(
@@ -1617,7 +1876,13 @@ if page == "Create New Run":
                                 run['status'] = 'completed'
                                 run['results'] = results
                                 run['completed_at'] = datetime.now()
+                                # Save Excel file path if available
+                                if results.get('excel_file'):
+                                    run['excel_file_path'] = results.get('excel_file')
                                 save_runs(runs)
+                                # Also save Excel file content to database
+                                if results.get('excel_file') and os.path.exists(results.get('excel_file')):
+                                    save_excel_to_db(run_id, results.get('excel_file'))
                                 break
                     except Exception as e:
                         # Log full exception to stdout/stderr (visible in Heroku logs)
@@ -1693,15 +1958,32 @@ elif page == "Jobs":
     
     # Get Excel file path helper function
     def get_excel_file_path(run_id):
-        """Get Excel file path from state file or run results"""
-        # First check if it's in run results
+        """Get Excel file path from database, run results, or state file"""
+        # First check if it's in run data (from database)
         for run in fresh_runs:
             if run.get('run_id') == run_id:
+                # Check excel_file_path from database
+                excel_file_path = run.get('excel_file_path')
+                if excel_file_path and os.path.exists(excel_file_path):
+                    return excel_file_path
+                
+                # Check results
                 results = run.get('results', {})
                 if results.get('excel_file'):
-                    return results.get('excel_file')
+                    excel_file = results.get('excel_file')
+                    if os.path.exists(excel_file):
+                        return excel_file
+                    # If file doesn't exist, try loading from database
+                    loaded_path = load_excel_from_db(run_id)
+                    if loaded_path:
+                        return loaded_path
         
-        # If not in results, check state file
+        # Try loading from database
+        loaded_path = load_excel_from_db(run_id)
+        if loaded_path:
+            return loaded_path
+        
+        # If not in database, check state file (for local development)
         state_file = get_app_data_dir() / "state" / f"run_{run_id}_state.json"
         if state_file.exists():
             try:
