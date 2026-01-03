@@ -1775,7 +1775,7 @@ elif page == "Jobs":
             else:
                 completed_at_str = 'In Progress' if status == 'running' else 'N/A'
             
-            # Status icon and label
+            # Status icon and label (no duplicates)
             if status == 'running':
                 status_icon = "🔄"
                 status_label = "Running"

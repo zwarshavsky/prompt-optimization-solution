@@ -1919,36 +1919,75 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                 except:
                     pass
             
-            new_sheet_name = create_analysis_sheet_with_prompts(
-                excel_file=excel_file,
-                questions_list=questions_list,
-                prompt_template_name=prompt_template_name,
-                search_index_id=search_index_id,
-                models_list=models_list,
-                refinement_stage=refinement_stage,
-                cycle_number=cycle_number,
-                config_dict=yaml_config
-            )
-            
-            log_print(f"\n✅ Step 2 Complete: Created sheet '{new_sheet_name}' with prompt responses")
-            
-            # Progress callback
-            if progress_callback:
-                try:
-                    progress_callback({'status': 'step_complete', 'cycle': cycle_number, 'step': 2, 'run_id': run_id, 'message': f'Test sheet created: {new_sheet_name}'})
-                except:
-                    pass
-            
-            # Save state after Step 2
-            save_state(
-                cycle_number=cycle_number,
-                last_completed_step=2,
-                sheet_name=new_sheet_name,
-                refinement_stage=refinement_stage,
-                excel_file=excel_file,
-                run_id=run_id,
-                yaml_config_snapshot=yaml_config
-            )
+            try:
+                new_sheet_name = create_analysis_sheet_with_prompts(
+                    excel_file=excel_file,
+                    questions_list=questions_list,
+                    prompt_template_name=prompt_template_name,
+                    search_index_id=search_index_id,
+                    models_list=models_list,
+                    refinement_stage=refinement_stage,
+                    cycle_number=cycle_number,
+                    config_dict=yaml_config
+                )
+                
+                log_print(f"\n✅ Step 2 Complete: Created sheet '{new_sheet_name}' with prompt responses")
+                
+                # Progress callback
+                if progress_callback:
+                    try:
+                        progress_callback({'status': 'step_complete', 'cycle': cycle_number, 'step': 2, 'run_id': run_id, 'message': f'Test sheet created: {new_sheet_name}'})
+                    except:
+                        pass
+                
+                # Save state after Step 2
+                save_state(
+                    cycle_number=cycle_number,
+                    last_completed_step=2,
+                    sheet_name=new_sheet_name,
+                    refinement_stage=refinement_stage,
+                    excel_file=excel_file,
+                    run_id=run_id,
+                    yaml_config_snapshot=yaml_config
+                )
+            except Exception as e:
+                log_print(f"\n❌ Step 2 Failed: {str(e)}")
+                
+                # Progress callback - report error
+                if progress_callback:
+                    try:
+                        error_msg = f"Step 2 Failed: {str(e)}"
+                        progress_callback({'status': 'error', 'cycle': cycle_number, 'step': 2, 'run_id': run_id, 'message': error_msg, 'error': str(e)})
+                    except:
+                        pass
+                
+                log_print("\n❌ CRITICAL ERROR: Step 2 (Testing Index & Invoking Prompts) failed.")
+                log_print("❌ The workflow cannot continue without successfully testing the index and invoking prompts.")
+                log_print("❌ This is a critical step and cannot be skipped.")
+                log_print(f"❌ Error details: {str(e)}")
+                log_print("\n💡 Possible solutions:")
+                log_print("   1. Check Salesforce credentials and connectivity")
+                log_print("   2. Verify search index ID and prompt template API name are correct")
+                log_print("   3. Ensure test questions are properly formatted")
+                log_print("   4. Review the full error message above for specific issues")
+                
+                # Save error state
+                save_state(
+                    cycle_number=cycle_number,
+                    last_completed_step=1,  # Only Step 1 completed
+                    sheet_name=None,
+                    refinement_stage=refinement_stage,
+                    stage_status='error',
+                    proposed_llm_parser_prompt=None,
+                    proposed_response_prompt=None,
+                    stage_complete_reason=f"Step 2 failed: {str(e)}",
+                    excel_file=excel_file,
+                    run_id=run_id,
+                    yaml_config_snapshot=yaml_config
+                )
+                
+                # Stop the workflow - don't continue
+                raise RuntimeError(f"Step 2 (Testing Index & Invoking Prompts) failed: {str(e)}. Workflow stopped.")
         
         # Step 3: Analyze Results (Gemini analysis)
         if resume_step and resume_step > 3:
@@ -2038,17 +2077,33 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
             except Exception as e:
                 error_type = type(e).__name__
                 error_msg = str(e)
-                log_print(f"\n❌ Step 3 FAILED: {error_type}")
-                log_print(f"   Error: {error_msg[:500]}")
-                log_print(f"\n💾 Saving failure state for resume...")
+                log_print(f"\n❌ Step 3 Failed: {error_type}: {error_msg[:500]}")
                 
-                # Save failure state so we can resume
+                # Progress callback - report error
+                if progress_callback:
+                    try:
+                        error_msg_full = f"Step 3 Failed: {error_type}: {error_msg}"
+                        progress_callback({'status': 'error', 'cycle': cycle_number, 'step': 3, 'run_id': run_id, 'message': error_msg_full, 'error': error_msg})
+                    except:
+                        pass
+                
+                log_print("\n❌ CRITICAL ERROR: Step 3 (Analyzing Results with Gemini) failed.")
+                log_print("❌ The workflow cannot continue without successfully analyzing results.")
+                log_print("❌ This is a critical step and cannot be skipped.")
+                log_print(f"❌ Error details: {error_type}: {error_msg}")
+                log_print("\n💡 Possible solutions:")
+                log_print("   1. Check Gemini API key is set correctly")
+                log_print("   2. Verify network connectivity to Gemini API")
+                log_print("   3. Check that the Excel sheet was created correctly in Step 2")
+                log_print("   4. Review the full error message above for specific issues")
+                
+                # Save error state
                 save_state(
                     cycle_number=cycle_number,
-                    last_completed_step=2,  # Revert to Step 2 since Step 3 failed
+                    last_completed_step=2,  # Only Step 2 completed
                     sheet_name=new_sheet_name,
                     refinement_stage=refinement_stage,
-                    stage_status=None,
+                    stage_status='error',
                     proposed_llm_parser_prompt=None,
                     proposed_response_prompt=None,
                     stage_complete_reason=f"Step 3 failed: {error_type}: {error_msg[:200]}",
@@ -2057,10 +2112,8 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                     yaml_config_snapshot=yaml_config
                 )
                 
-                log_print(f"\n⚠️  Workflow paused due to error in Step 3")
-                log_print(f"   To resume: python main.py --full-workflow --resume --yaml-input {yaml_input}")
-                log_print(f"   The sheet '{new_sheet_name}' is ready for Step 3 retry")
-                raise  # Re-raise to stop workflow
+                # Stop the workflow - don't continue
+                raise RuntimeError(f"Step 3 (Analyzing Results with Gemini) failed: {error_type}: {error_msg}. Workflow stopped.")
         
         # Check if we should continue
         if stage_status == "optimized":
