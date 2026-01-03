@@ -843,6 +843,15 @@ def progress_callback(status_dict):
                     message = f'Cycle {cycle} - Step 3 Complete: Gemini analysis finished'
                     if stage_status:
                         message += f' (Stage Status: {stage_status})'
+                    # Save Excel file to database after Step 3 (it's been updated with analysis results)
+                    excel_file_path = status_dict.get('excel_file')
+                    if excel_file_path and os.path.exists(excel_file_path):
+                        try:
+                            save_excel_to_db(run.get('run_id'), excel_file_path)
+                            run['excel_file_path'] = excel_file_path
+                            print(f"[PROGRESS_CALLBACK] Updated Excel file in DB after Step 3: {excel_file_path}", flush=True)
+                        except Exception as e:
+                            print(f"[PROGRESS_CALLBACK] Error updating Excel in DB after Step 3: {e}", flush=True)
                 else:
                     message = f'Cycle {cycle} - {step_name} Complete'
             elif status == 'complete':

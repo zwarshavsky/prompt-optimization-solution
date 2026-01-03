@@ -2047,13 +2047,6 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                 if stage_complete_reason:
                     log_print(f"   Reason: {stage_complete_reason[:100]}...")
                 
-                # Progress callback
-                if progress_callback:
-                    try:
-                        progress_callback({'status': 'step_complete', 'cycle': cycle_number, 'step': 3, 'stage_status': stage_status, 'run_id': run_id, 'message': f'Gemini analysis complete (Stage Status: {stage_status})'})
-                    except:
-                        pass
-                
                 # Extract results for summary sheet
                 results_data = extract_results_from_sheet(excel_file, new_sheet_name)
                 
@@ -2065,6 +2058,21 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                     results_data=results_data,
                     config_dict=yaml_config
                 )
+                
+                # Progress callback - include Excel file path AFTER it's been updated with analysis results
+                if progress_callback:
+                    try:
+                        progress_callback({
+                            'status': 'step_complete', 
+                            'cycle': cycle_number, 
+                            'step': 3, 
+                            'stage_status': stage_status, 
+                            'run_id': run_id, 
+                            'message': f'Gemini analysis complete (Stage Status: {stage_status})',
+                            'excel_file': str(excel_file) if excel_file else None
+                        })
+                    except:
+                        pass
                 
                 # Save state after Step 3
                 save_state(
