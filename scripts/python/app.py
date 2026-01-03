@@ -830,6 +830,15 @@ def progress_callback(status_dict):
                     message = f'Cycle {cycle} - Step 1 Complete: Search Index updated and rebuilt'
                 elif step == 2:
                     message = f'Cycle {cycle} - Step 2 Complete: Test sheet created with prompt responses'
+                    # Save Excel file to database immediately after Step 2 completes
+                    excel_file_path = status_dict.get('excel_file')
+                    if excel_file_path and os.path.exists(excel_file_path):
+                        try:
+                            save_excel_to_db(run.get('run_id'), excel_file_path)
+                            run['excel_file_path'] = excel_file_path
+                            print(f"[PROGRESS_CALLBACK] Saved Excel file to DB: {excel_file_path}", flush=True)
+                        except Exception as e:
+                            print(f"[PROGRESS_CALLBACK] Error saving Excel to DB: {e}", flush=True)
                 elif step == 3:
                     message = f'Cycle {cycle} - Step 3 Complete: Gemini analysis finished'
                     if stage_status:
@@ -1959,13 +1968,26 @@ elif page == "Jobs":
     # Get Excel file path helper function
     def get_excel_file_path(run_id):
         """Get Excel file path from database, run results, or state file"""
-        # First check if it's in run data (from database)
+        # For running jobs on Heroku, check database FIRST (filesystem is ephemeral)
+        # Try loading from database first (most reliable for Heroku)
+        loaded_path = load_excel_from_db(run_id)
+        if loaded_path:
+            return loaded_path
+        
+        # Then check if it's in run data (from database)
         for run in fresh_runs:
             if run.get('run_id') == run_id:
-                # Check excel_file_path from database
+                # Check excel_file_path from database record
                 excel_file_path = run.get('excel_file_path')
-                if excel_file_path and os.path.exists(excel_file_path):
-                    return excel_file_path
+                if excel_file_path:
+                    # If file exists on disk, return it
+                    if os.path.exists(excel_file_path):
+                        return excel_file_path
+                    # If not on disk but path is stored, try loading from DB again
+                    # (might have been saved after we checked)
+                    loaded_path = load_excel_from_db(run_id)
+                    if loaded_path:
+                        return loaded_path
                 
                 # Check results
                 results = run.get('results', {})
@@ -1978,11 +2000,6 @@ elif page == "Jobs":
                     if loaded_path:
                         return loaded_path
         
-        # Try loading from database
-        loaded_path = load_excel_from_db(run_id)
-        if loaded_path:
-            return loaded_path
-        
         # If not in database, check state file (for local development)
         state_file = get_app_data_dir() / "state" / f"run_{run_id}_state.json"
         if state_file.exists():
@@ -1990,8 +2007,14 @@ elif page == "Jobs":
                 with open(state_file, 'r') as f:
                     state = json.load(f)
                     excel_file = state.get('excel_file')
-                    if excel_file and os.path.exists(excel_file):
-                        return excel_file
+                    if excel_file:
+                        # If file exists on disk, return it
+                        if os.path.exists(excel_file):
+                            return excel_file
+                        # If not on disk, try loading from DB (might have been saved)
+                        loaded_path = load_excel_from_db(run_id)
+                        if loaded_path:
+                            return loaded_path
             except:
                 pass
         return None

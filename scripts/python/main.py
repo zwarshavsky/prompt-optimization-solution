@@ -1933,10 +1933,17 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                 
                 log_print(f"\n✅ Step 2 Complete: Created sheet '{new_sheet_name}' with prompt responses")
                 
-                # Progress callback
+                # Progress callback - include Excel file path so it can be saved to DB immediately
                 if progress_callback:
                     try:
-                        progress_callback({'status': 'step_complete', 'cycle': cycle_number, 'step': 2, 'run_id': run_id, 'message': f'Test sheet created: {new_sheet_name}'})
+                        progress_callback({
+                            'status': 'step_complete', 
+                            'cycle': cycle_number, 
+                            'step': 2, 
+                            'run_id': run_id, 
+                            'message': f'Test sheet created: {new_sheet_name}',
+                            'excel_file': str(excel_file) if excel_file else None
+                        })
                     except:
                         pass
                 
