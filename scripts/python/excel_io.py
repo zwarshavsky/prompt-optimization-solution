@@ -24,9 +24,15 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
     """
     Create a new timestamped sheet with columns A-D, get prompts/metadata, and fetch answers from Salesforce
     """
-    # #region agent log
-    with open('/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/.cursor/debug.log', 'a') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"ALL","location":"excel_io.py:create_analysis_sheet_with_prompts","message":"ENTRY","data":{"excel_file":str(excel_file),"has_questions_list":questions_list is not None,"questions_count":len(questions_list) if questions_list else 0,"prompt_template":prompt_template_name},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+    # #region agent log (optional - only if debug.log exists locally)
+    try:
+        debug_log_path = Path('/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/.cursor/debug.log')
+        if debug_log_path.parent.exists():
+            with open(debug_log_path, 'a') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"ALL","location":"excel_io.py:create_analysis_sheet_with_prompts","message":"ENTRY","data":{"excel_file":str(excel_file),"has_questions_list":questions_list is not None,"questions_count":len(questions_list) if questions_list else 0,"prompt_template":prompt_template_name},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+    except (FileNotFoundError, OSError):
+        # Silently skip debug logging if path doesn't exist (e.g., on Heroku)
+        pass
     # #endregion
 
     if not prompt_template_name:
