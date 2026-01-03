@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# Runtime data (app_data, outputs, etc.)
+scripts/python/app_data/
+scripts/python/outputs/
+scripts/python/live_outputs/
+live_outputs/
+*.xlsx
+*.json
+!inputs/prompt_optimization_input.yaml
+
+# API Keys and Secrets (DO NOT COMMIT)
+scripts/python/gemini_config.py
+scripts/python/gemini_config_local.py
+*.key
+*.pem
+
+# Testing and Exploration
+scripts/python/explorer/
+scripts/python/debugging/
+archive_*/
+
+# Mockups (not needed for deployment)
+streamlit-mockup/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Shell scripts (not needed for Heroku)
+*.sh
+!verify_setup.sh
+
+# Test data
+inputs/csv/
+inputs/pdf/
+inputs/*.xlsx
+inputs/*.json
+inputs/*.txt
+
+# Documentation (optional - keep if you want)
+# docs/
+
