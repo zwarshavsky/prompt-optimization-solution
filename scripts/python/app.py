@@ -1571,7 +1571,13 @@ if page == "Create New Run":
                 
                 # Start workflow
                 def run_workflow():
+                    import sys
+                    import traceback
                     try:
+                        # Log workflow start to stdout (visible in Heroku logs)
+                        print(f"[WORKFLOW_START] Run ID: {run_id} - Starting workflow execution", flush=True)
+                        sys.stdout.flush()
+                        
                         # Pass run_id to main.py and progress callback
                         def callback_with_run_id(status_dict):
                             # Ensure run_id is in status_dict (main.py should include it, but add as fallback)
@@ -1579,11 +1585,17 @@ if page == "Create New Run":
                                 status_dict['run_id'] = run_id
                             progress_callback(status_dict)
                         
+                        print(f"[WORKFLOW_START] Run ID: {run_id} - Calling run_full_workflow", flush=True)
+                        sys.stdout.flush()
+                        
                         results = run_full_workflow(
                             yaml_config_dict=yaml_config,
                             progress_callback=callback_with_run_id,
                             run_id=run_id  # Pass run_id to main.py so it uses the same ID
                         )
+                        
+                        print(f"[WORKFLOW_COMPLETE] Run ID: {run_id} - Workflow finished successfully", flush=True)
+                        sys.stdout.flush()
                         
                         # Update run status in file
                         runs = load_runs()
@@ -1595,12 +1607,20 @@ if page == "Create New Run":
                                 save_runs(runs)
                                 break
                     except Exception as e:
+                        # Log full exception to stdout/stderr (visible in Heroku logs)
+                        error_msg = f"[WORKFLOW_ERROR] Run ID: {run_id} - Exception occurred: {str(e)}"
+                        print(error_msg, flush=True, file=sys.stderr)
+                        print(f"[WORKFLOW_ERROR] Traceback:", flush=True, file=sys.stderr)
+                        traceback.print_exc(file=sys.stderr)
+                        sys.stderr.flush()
+                        
                         # Update run status in file
                         runs = load_runs()
                         for run in runs:
                             if run.get('run_id') == run_id:
                                 run['status'] = 'failed'
                                 run['error'] = str(e)
+                                run['traceback'] = traceback.format_exc()
                                 run['completed_at'] = datetime.now()
                                 save_runs(runs)
                                 break
