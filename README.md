@@ -19,6 +19,92 @@ An automated RAG (Retrieval-Augmented Generation) optimization system that itera
 
 ---
 
+## Prerequisites
+
+**These prerequisites are required for BOTH deployed and local usage:**
+
+### 1. Salesforce Org Setup
+
+#### Functional Search Index
+- A **Data Cloud Search Index** that already exists and is functional
+- Must have an **LLM parser prompt** configured
+- Must have a **retriever** pointing to the Search Index
+- **Search Index ID** (18-character Salesforce record ID, e.g., `18lHu000000CgpDIAS`)
+- The solution will **update** this index's LLM parser prompt during optimization
+
+#### Prompt Builder Template
+- A **Prompt Builder prompt template** that already exists
+- Must be configured to use the Search Index (retriever points to the Search Index)
+- **Prompt Template API Name** (DeveloperName, not display name, e.g., `Test_RAG_Optimization_SFR_v1`)
+- The solution will invoke this prompt template to test the Search Index
+
+#### Salesforce Credentials
+- Username and password for Salesforce authentication
+- Instance URL (e.g., `https://yourinstance.my.salesforce.com`)
+
+### 2. YAML Configuration File
+
+A properly configured `prompt_optimization_input.yaml` file containing:
+
+- **Salesforce Configuration**:
+  - `salesforce.username` - Salesforce username
+  - `salesforce.password` - Salesforce password
+  - `salesforce.instanceUrl` - Salesforce instance URL
+  - `searchIndexId` - The 18-character Search Index record ID
+  - `promptTemplateApiName` - The Prompt Builder template DeveloperName
+  - `refinementStage` - Currently `"llm_parser"` (other stages coming soon)
+
+- **Gemini Configuration**:
+  - `geminiModel` - Gemini model to use for analysis (e.g., `"gemini-2.5-pro"`)
+  - `pdfDirectory` - Path to PDF files for context (optional)
+
+- **Test Questions and Ground Truth**:
+  - `questions` - Array of test questions with:
+    - `number` - Question identifier (e.g., `"Q1"`)
+    - `text` - The test question text
+    - `expectedAnswer` - The target/ground truth answer
+
+- **Refinement Stage Configuration**:
+  - `refinementStages.llm_parser` - Instructions for Gemini on how to analyze and optimize
+
+**See the [Configuration: YAML Input File](#configuration-yaml-input-file) section below for detailed examples.**
+
+### 3. Source Documents (PDFs or Resource Files)
+
+- **PDF files** (or other resource files) that contain the answers to your test questions
+- These files serve as the **ground truth source** for Gemini analysis
+- All PDFs in the configured `pdfDirectory` will be uploaded to Gemini for context
+- Gemini uses these to verify if the Search Index is retrieving and answering correctly
+
+### 4. Test Questions with Target Answers (Ground Truth)
+
+- A **list of test questions** that will be used to evaluate the Search Index
+- Each question must have a corresponding **expected/target answer** (ground truth)
+- These questions and answers are defined in the YAML configuration file
+- The solution will:
+  1. Invoke the Prompt Builder template with each test question
+  2. Compare the generated answer to the expected answer
+  3. Use Gemini to analyze failures and propose improvements
+
+**Example:**
+```yaml
+questions:
+  - number: "Q1"
+    text: "How many Siemens 400A breakers can I fit in a distribution section?"
+    expectedAnswer: |
+      - 4x chassis: 10 Thermal Magnetic breakers twin mounted
+      - 5x chassis: 14 Thermal Magnetic breakers twin mounted
+```
+
+### 5. Google Gemini API Key
+
+- Required for AI-powered analysis of test results
+- Get your API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
+- For deployed app: Set as Heroku config var `GOOGLE_API_KEY`
+- For local testing: Set as environment variable `GOOGLE_API_KEY`
+
+---
+
 **Note**: The sections below on "Local Development Setup" are **only for local testing and development**. If you just want to use the application, use the deployed URL above.
 
 ### Deployed vs. Local Usage
@@ -26,7 +112,8 @@ An automated RAG (Retrieval-Augmented Generation) optimization system that itera
 | Feature | Deployed App | Local Setup |
 |---------|-------------|-------------|
 | **Purpose** | Production use, ready to run | Development, testing, debugging |
-| **Setup Required** | None - just open the URL | Python, dependencies, database setup |
+| **Prerequisites** | Same for both (see above) | Same for both (see above) |
+| **Setup Required** | None - just open the URL | Python 3.8+, dependencies, database setup |
 | **Data Storage** | Heroku Postgres (persistent) | Local PostgreSQL or Heroku Postgres |
 | **Access** | [https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/](https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/) | `http://localhost:8501` |
 | **When to Use** | Regular usage, production jobs | Testing changes, development, debugging |
@@ -261,30 +348,15 @@ Workflow Completes
 Status: 'completed' or 'failed'
 ```
 
-## Prerequisites
+### Additional Requirements for Local Development
 
-### Required in Salesforce Org
-
-1. **Search Index** (must exist)
-   - A Data Cloud Search Index with an LLM parser prompt
-   - Search Index ID (18-character Salesforce record ID)
-   - The solution will **update** this index's LLM parser prompt
-
-2. **Prompt Builder Template** (must exist)
-   - A Prompt Builder template configured to use the Search Index
-   - Prompt Template API Name (DeveloperName, e.g., `Test_RAG_Optimization_SFR_v1`)
-   - Must be configured to invoke the Search Index for retrieval
-
-3. **Salesforce Credentials**
-   - Username and password for authentication
-   - Instance URL (e.g., `https://yourinstance.my.salesforce.com`)
-
-### Required Locally
+If you're setting up locally for testing/development, you also need:
 
 1. **Python 3.8+**
 2. **Virtual Environment** (recommended)
-3. **Google Gemini API Key** (for analysis)
-4. **Heroku Postgres** (for deployment) or local PostgreSQL (for local testing)
+3. **PostgreSQL Database**:
+   - Option A: Use Heroku Postgres (get `DATABASE_URL` from Heroku)
+   - Option B: Set up local PostgreSQL instance
 
 ## Configuration: YAML Input File
 
