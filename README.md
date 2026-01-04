@@ -2,6 +2,35 @@
 
 An automated RAG (Retrieval-Augmented Generation) optimization system that iteratively improves LLM parser prompts for Salesforce Data Cloud Search Indexes using AI-driven analysis and testing.
 
+## 🚀 Quick Start: Using the Deployed Application
+
+**The application is deployed and ready to use:**
+
+👉 **[https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/](https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/)**
+
+### Using the Deployed App
+
+1. **Access the Web Interface**: Open the URL above in your browser
+2. **Create a Job**: Use the web interface to create a new optimization job
+3. **Monitor Progress**: View real-time job status, progress, and results in the dashboard
+4. **Download Results**: Download Excel files with analysis results when jobs complete
+
+**No local setup required** - the application runs entirely in the cloud with persistent storage.
+
+---
+
+**Note**: The sections below on "Local Development Setup" are **only for local testing and development**. If you just want to use the application, use the deployed URL above.
+
+### Deployed vs. Local Usage
+
+| Feature | Deployed App | Local Setup |
+|---------|-------------|-------------|
+| **Purpose** | Production use, ready to run | Development, testing, debugging |
+| **Setup Required** | None - just open the URL | Python, dependencies, database setup |
+| **Data Storage** | Heroku Postgres (persistent) | Local PostgreSQL or Heroku Postgres |
+| **Access** | [https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/](https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/) | `http://localhost:8501` |
+| **When to Use** | Regular usage, production jobs | Testing changes, development, debugging |
+
 ## Overview
 
 This solution automates the optimization of LLM parser prompts for Data Cloud Search Indexes through an iterative refinement process:
@@ -330,6 +359,14 @@ configuration:
 
 ## Local Development Setup
 
+> **Note**: This section is for **local testing and development only**. If you want to use the application, use the [deployed version](#-quick-start-using-the-deployed-application) instead.
+
+Local setup allows you to:
+- Test changes before deploying
+- Debug issues in a local environment
+- Develop new features
+- Run the application on your own infrastructure
+
 ### 1. Clone Repository
 
 ```bash
@@ -404,7 +441,7 @@ Edit `inputs/prompt_optimization_input.yaml`:
 
 ### 8. Run Locally
 
-**Option A: Run Web Application**
+**Option A: Run Web Application (Local Testing)**
 
 ```bash
 cd scripts/python
@@ -413,6 +450,8 @@ streamlit run app.py
 ```
 
 Access at `http://localhost:8501`
+
+> **Note**: This runs a local instance for testing. For production use, use the [deployed application](https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/).
 
 **Option B: Run Worker Process**
 
@@ -433,6 +472,8 @@ python main.py --yaml-input ../inputs/prompt_optimization_input.yaml
 
 ## Deployment to Heroku
 
+> **Note**: The application is already deployed at [https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/](https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/). This section is for deploying your own instance or updating the existing deployment.
+
 ### 1. Prerequisites
 
 - Heroku account
@@ -444,6 +485,8 @@ python main.py --yaml-input ../inputs/prompt_optimization_input.yaml
 ```bash
 heroku create your-app-name
 ```
+
+**Note**: The existing deployment uses the app name `sf-rag-optimizer`.
 
 ### 3. Add Heroku Postgres
 
