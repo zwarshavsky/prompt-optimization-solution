@@ -97,8 +97,26 @@ def worker_progress_callback(status_dict: Dict[str, Any]):
         # Update heartbeat
         update_job_heartbeat(run_id)
         
+        # Save Excel file to database if provided (after Step 2 or Step 3)
+        excel_file_path = status_dict.get('excel_file')
+        if excel_file_path and os.path.exists(excel_file_path):
+            try:
+                # Import save_excel_to_db from app module
+                from app import save_excel_to_db
+                
+                if save_excel_to_db(run_id, excel_file_path):
+                    print(f"[WORKER] Saved Excel file to DB: {excel_file_path}", flush=True)
+                else:
+                    print(f"[WORKER] Warning: Failed to save Excel file to DB: {excel_file_path}", flush=True)
+            except Exception as e:
+                print(f"[WORKER] Error saving Excel file to DB: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+        
     except Exception as e:
         print(f"[WORKER] Error in progress callback: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
 
 
 def process_job(run_id: str, resume_info: Optional[Dict[str, Any]] = None) -> bool:
