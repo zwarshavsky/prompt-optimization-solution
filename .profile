@@ -5,3 +5,4 @@ if [ ! -d "/app/.cache/ms-playwright/chromium-1200" ]; then
     python -m playwright install chromium
 fi
 
+

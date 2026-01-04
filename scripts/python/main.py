@@ -20,6 +20,7 @@ import time
 import yaml
 import asyncio
 from pathlib import Path
+from datetime import datetime
 from gemini_client import genai, USE_NEW_GENAI
 from excel_io import create_analysis_sheet_with_prompts, update_run_summary_sheet
 from salesforce_api import (
@@ -1688,10 +1689,29 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
         stage_complete_reason = ''
         is_resuming = False
     
+    # Initialize heartbeat tracking
+    last_heartbeat = datetime.now()
+    heartbeat_interval = 30  # Update heartbeat every 30 seconds during long operations
+    
     while cycle_number <= max_cycles:
         # Clear resume flag if we were resuming
         if is_resuming:
             is_resuming = False
+        
+        # Update heartbeat if it's been more than heartbeat_interval seconds
+        if (datetime.now() - last_heartbeat).total_seconds() > heartbeat_interval:
+            if progress_callback:
+                try:
+                    progress_callback({
+                        'status': 'heartbeat',
+                        'run_id': run_id,
+                        'cycle': cycle_number,
+                        'step': 0,
+                        'message': f'Heartbeat - Cycle {cycle_number} in progress'
+                    })
+                except:
+                    pass
+            last_heartbeat = datetime.now()
         
         log_print("\n" + "="*80)
         log_print(f"🔄 REFINEMENT CYCLE {cycle_number}")
@@ -1703,6 +1723,7 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                 progress_callback({'status': 'cycle_start', 'cycle': cycle_number, 'step': 0, 'run_id': run_id})
             except:
                 pass
+            last_heartbeat = datetime.now()  # Reset heartbeat on cycle start
         
         # Determine if this is Cycle 1 (baseline test, no update needed)
         # Cycle 1 is when cycle_number == 1 AND we don't have a previous cycle's proposed prompt
@@ -2148,6 +2169,19 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
         
         if cycle_number <= max_cycles:
             log_print("   Waiting 5 seconds before next cycle...")
+            # Update heartbeat before waiting
+            if progress_callback:
+                try:
+                    progress_callback({
+                        'status': 'heartbeat',
+                        'run_id': run_id,
+                        'cycle': cycle_number,
+                        'step': 0,
+                        'message': f'Preparing for next cycle...'
+                    })
+                except:
+                    pass
+            last_heartbeat = datetime.now()
             time.sleep(5)
         
         # Clear resume_step flag after first iteration (so next cycle runs normally)

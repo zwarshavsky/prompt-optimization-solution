@@ -98,8 +98,20 @@ def init_database():
                     started_at TIMESTAMP,
                     completed_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    heartbeat_at TIMESTAMP,
+                    checkpoint_info JSONB
                 )
+            """)
+            
+            # Add heartbeat_at column if it doesn't exist (for existing databases)
+            cur.execute("""
+                ALTER TABLE runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP
+            """)
+            
+            # Add checkpoint_info column if it doesn't exist (for resume functionality)
+            cur.execute("""
+                ALTER TABLE runs ADD COLUMN IF NOT EXISTS checkpoint_info JSONB
             """)
             
             # Create index on status for faster filtering
@@ -110,6 +122,11 @@ def init_database():
             # Create index on started_at for sorting
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC)
+            """)
+            
+            # Create composite index on status and heartbeat_at for worker polling and dead job detection
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_runs_status_heartbeat ON runs(status, heartbeat_at)
             """)
             
             conn.commit()
@@ -224,7 +241,8 @@ def load_runs() -> List[Dict]:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT run_id, status, config, progress, output_lines, 
-                           results, error, error_details, excel_file_path, started_at, completed_at
+                           results, error, error_details, excel_file_path, 
+                           started_at, completed_at, heartbeat_at, checkpoint_info
                     FROM runs
                     ORDER BY started_at DESC
                 """)
@@ -242,7 +260,9 @@ def load_runs() -> List[Dict]:
                         'error_details': row[7],
                         'excel_file_path': row[8],
                         'started_at': row[9],
-                        'completed_at': row[10]
+                        'completed_at': row[10],
+                        'heartbeat_at': row[11],
+                        'checkpoint_info': row[12] if row[12] else {}
                     }
                     # Convert datetime strings to datetime objects
                     deserialize_datetime(run)
@@ -269,6 +289,59 @@ def load_runs() -> List[Dict]:
             return []
     return []
 
+def detect_and_mark_dead_jobs(stale_threshold_minutes: int = 2) -> int:
+    """
+    Detect jobs that haven't updated heartbeat in > threshold minutes and mark them as failed.
+    Returns count of dead jobs marked.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return 0
+    
+    try:
+        with conn.cursor() as cur:
+            # Find jobs with status='running' that have stale or missing heartbeat
+            cur.execute("""
+                SELECT run_id, heartbeat_at, updated_at
+                FROM runs
+                WHERE status = 'running'
+                AND (
+                    heartbeat_at IS NULL 
+                    OR heartbeat_at < NOW() - INTERVAL '%s minutes'
+                )
+            """, (stale_threshold_minutes,))
+            
+            dead_jobs = cur.fetchall()
+            count = 0
+            
+            for run_id, heartbeat_at, updated_at in dead_jobs:
+                # Mark as failed with appropriate error message
+                error_msg = f"Job appears to have stopped (no heartbeat detected for > {stale_threshold_minutes} minutes). Possible dyno restart or process crash."
+                
+                # Use heartbeat_at if available, otherwise updated_at
+                last_activity = heartbeat_at if heartbeat_at else updated_at
+                
+                cur.execute("""
+                    UPDATE runs
+                    SET status = 'failed',
+                        error = %s,
+                        completed_at = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE run_id = %s
+                """, (error_msg, last_activity, run_id))
+                count += 1
+            
+            conn.commit()
+            if count > 0:
+                print(f"[APP] Detected {count} dead job(s) and marked as failed", flush=True)
+            return count
+    except Exception as e:
+        print(f"Error detecting dead jobs: {e}", flush=True)
+        conn.rollback()
+        return 0
+    finally:
+        conn.close()
+
 def save_runs(runs: List[Dict]) -> None:
     """Save runs to persistent storage (Postgres or JSON fallback)"""
     # Try Postgres first
@@ -284,21 +357,26 @@ def save_runs(runs: List[Dict]) -> None:
                     run_copy = run.copy()
                     started_at = run_copy.get('started_at')
                     completed_at = run_copy.get('completed_at')
+                    heartbeat_at = run_copy.get('heartbeat_at')
                     excel_file_path = run_copy.get('excel_file_path') or run_copy.get('results', {}).get('excel_file', '')
+                    checkpoint_info = run_copy.get('checkpoint_info', {})
                     
                     if isinstance(started_at, datetime):
                         started_at = started_at.isoformat()
                     if isinstance(completed_at, datetime):
                         completed_at = completed_at.isoformat()
+                    if isinstance(heartbeat_at, datetime):
+                        heartbeat_at = heartbeat_at.isoformat()
                     
                     # Use INSERT ... ON CONFLICT to update existing runs
                     cur.execute("""
                         INSERT INTO runs (
                             run_id, status, config, progress, output_lines,
-                            results, error, error_details, excel_file_path, started_at, completed_at, updated_at
+                            results, error, error_details, excel_file_path, 
+                            started_at, completed_at, heartbeat_at, checkpoint_info, updated_at
                         ) VALUES (
                             %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
-                            %s::jsonb, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP
+                            %s::jsonb, %s, %s, %s, %s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP
                         )
                         ON CONFLICT (run_id) DO UPDATE SET
                             status = EXCLUDED.status,
@@ -311,6 +389,8 @@ def save_runs(runs: List[Dict]) -> None:
                             excel_file_path = EXCLUDED.excel_file_path,
                             started_at = EXCLUDED.started_at,
                             completed_at = EXCLUDED.completed_at,
+                            heartbeat_at = EXCLUDED.heartbeat_at,
+                            checkpoint_info = EXCLUDED.checkpoint_info,
                             updated_at = CURRENT_TIMESTAMP
                     """, (
                         run_copy.get('run_id'),
@@ -323,7 +403,9 @@ def save_runs(runs: List[Dict]) -> None:
                         run_copy.get('error_details'),
                         excel_file_path,
                         started_at,
-                        completed_at
+                        completed_at,
+                        heartbeat_at,
+                        json.dumps(checkpoint_info) if checkpoint_info else None
                     ))
                 
                 conn.commit()
@@ -801,6 +883,9 @@ def progress_callback(status_dict):
         if found_run:
             run = found_run
             run['progress'] = status_dict
+            
+            # Update heartbeat on every progress update
+            run['heartbeat_at'] = datetime.now()
             
             # Store output lines for live display
             if 'output_lines' not in run:
@@ -1857,74 +1942,14 @@ if page == "Create New Run":
                 st.session_state.runs.append(run_data)
                 st.session_state.current_run = run_data
                 st.session_state.show_create_modal = False
-                save_runs(st.session_state.runs)  # Persist to file
                 
-                # Start workflow
-                def run_workflow():
-                    import sys
-                    import traceback
-                    try:
-                        # Log workflow start to stdout (visible in Heroku logs)
-                        print(f"[WORKFLOW_START] Run ID: {run_id} - Starting workflow execution", flush=True)
-                        sys.stdout.flush()
-                        
-                        # Pass run_id to main.py and progress callback
-                        def callback_with_run_id(status_dict):
-                            # Ensure run_id is in status_dict (main.py should include it, but add as fallback)
-                            if 'run_id' not in status_dict:
-                                status_dict['run_id'] = run_id
-                            progress_callback(status_dict)
-                        
-                        print(f"[WORKFLOW_START] Run ID: {run_id} - Calling run_full_workflow", flush=True)
-                        sys.stdout.flush()
-                        
-                        results = run_full_workflow(
-                            yaml_config_dict=yaml_config,
-                            progress_callback=callback_with_run_id,
-                            run_id=run_id  # Pass run_id to main.py so it uses the same ID
-                        )
-                        
-                        print(f"[WORKFLOW_COMPLETE] Run ID: {run_id} - Workflow finished successfully", flush=True)
-                        sys.stdout.flush()
-                        
-                        # Update run status in file
-                        runs = load_runs()
-                        for run in runs:
-                            if run.get('run_id') == run_id:
-                                run['status'] = 'completed'
-                                run['results'] = results
-                                run['completed_at'] = datetime.now()
-                                # Save Excel file path if available
-                                if results.get('excel_file'):
-                                    run['excel_file_path'] = results.get('excel_file')
-                                save_runs(runs)
-                                # Also save Excel file content to database
-                                if results.get('excel_file') and os.path.exists(results.get('excel_file')):
-                                    save_excel_to_db(run_id, results.get('excel_file'))
-                                break
-                    except Exception as e:
-                        # Log full exception to stdout/stderr (visible in Heroku logs)
-                        error_msg = f"[WORKFLOW_ERROR] Run ID: {run_id} - Exception occurred: {str(e)}"
-                        print(error_msg, flush=True, file=sys.stderr)
-                        print(f"[WORKFLOW_ERROR] Traceback:", flush=True, file=sys.stderr)
-                        traceback.print_exc(file=sys.stderr)
-                        sys.stderr.flush()
-                        
-                        # Update run status in file
-                        runs = load_runs()
-                        for run in runs:
-                            if run.get('run_id') == run_id:
-                                run['status'] = 'failed'
-                                run['error'] = str(e)
-                                run['traceback'] = traceback.format_exc()
-                                run['completed_at'] = datetime.now()
-                                save_runs(runs)
-                                break
+                # Mark job as queued (worker will pick it up)
+                run_data['status'] = 'queued'
+                save_runs(st.session_state.runs)  # Persist to database/file
                 
-                thread = threading.Thread(target=run_workflow, daemon=True)
-                thread.start()
-                st.success(f"✅ Workflow started! Run ID: `{run_id}`")
-                st.info("💡 Switch to 'Active Jobs' page to monitor real-time progress.")
+                print(f"[APP] Job queued: {run_id}", flush=True)
+                st.success(f"✅ Workflow queued! Run ID: `{run_id}`")
+                st.info("💡 Worker will pick up the job shortly. Switch to 'Jobs' page to monitor progress.")
 
 elif page == "Jobs":
     # Page Header
@@ -1947,6 +1972,14 @@ elif page == "Jobs":
     
     # Always reload runs from file to get latest updates
     fresh_runs = load_runs()
+    
+    # Detect and mark dead jobs (jobs with stale heartbeat)
+    dead_count = detect_and_mark_dead_jobs()
+    if dead_count > 0:
+        st.warning(f"⚠️ Detected {dead_count} dead job(s) and marked as failed")
+        # Reload runs after marking dead jobs
+        fresh_runs = load_runs()
+    
     st.session_state.runs = fresh_runs
     
     # Filter options
