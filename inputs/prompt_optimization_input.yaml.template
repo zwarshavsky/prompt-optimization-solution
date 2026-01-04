@@ -1,0 +1,395 @@
+configuration:
+  # Salesforce login credentials
+  # IMPORTANT: Replace these placeholders with your actual Salesforce credentials
+  # DO NOT commit this file with real credentials to version control
+  salesforce:
+    username: "YOUR_SALESFORCE_USERNAME@example.com"
+    password: "YOUR_SALESFORCE_PASSWORD"
+    instanceUrl: "https://your-instance.my.salesforce.com"
+  
+  # Take screenshots during Playwright automation (default: false)
+  takeScreenshots: false
+  # Headless mode: false = visible browser window (default for local), true = no browser window (for Linux servers)
+  headless: false  # Set to true only for headless Linux server deployment
+  # Slow motion: Delay in milliseconds between Playwright actions (0 = no delay, 500 = half second delay for debugging)
+  slowMo: 0  # Set to 500 for slower, visible automation during debugging
+  
+  # Gemini Model Configuration
+  # Model to use for Gemini analysis
+  geminiModel: "gemini-2.5-pro"  # Default model for Gemini analysis
+  # Available Gemini Models (as of 2025):
+  # STABLE MODELS (Recommended for production):
+  #   - "gemini-2.5-pro"          - Latest Pro model, best quality (recommended)
+  #   - "gemini-2.5-flash"        - Fast, efficient model
+  #   - "gemini-2.0-flash"        - Previous generation Flash
+  #   - "gemini-2.0-flash-001"    - Specific version of 2.0 Flash
+  # PREVIEW MODELS (Latest features, may change):
+  #   - "gemini-2.5-pro-preview-06-05"      - Latest Pro preview
+  #   - "gemini-2.5-pro-preview-05-06"      - Earlier Pro preview
+  #   - "gemini-2.5-pro-preview-03-25"      - Older Pro preview
+  #   - "gemini-2.5-flash-preview-05-20"    - Flash preview
+  #   - "gemini-2.5-flash-lite-preview-06-17" - Lite Flash preview
+  #   - "gemini-2.0-flash-lite-preview-02-05" - 2.0 Lite preview
+  #   - "gemini-2.0-flash-lite-preview"      - 2.0 Lite preview
+  # EXPERIMENTAL MODELS (Use with caution):
+  #   - "gemini-2.0-flash-exp"                    - Experimental Flash
+  #   - "gemini-2.0-flash-exp-image-generation"   - With image generation
+  # DEPRECATED/RETIRED (Don't use):
+  #   - "gemini-1.5-pro"   - Retired April 2025
+  #   - "gemini-1.5-flash" - Retired April 2025
+  #   - "gemini-pro"       - Retired
+  
+  # PDF Directory: Path to directory containing PDF files to upload to Gemini for context
+  # All PDF files in this directory will be uploaded and used for analysis
+  pdfDirectory: "prompt-optimization-solution/inputs/pdf"  # Relative path from project root, or absolute path
+  
+  # Excel File: ONLY used for standalone mode (test_gemini.py). Full workflow (main.py --full-workflow) ignores this
+  # and creates its own Excel files in live_outputs/ directory. Uncomment if using test_gemini.py standalone.
+  # excelFile: "prompt-optimization-solution/inputs/IEM POC questions  .xlsx"
+  # Prompt Template API Name: The DeveloperName (API name) of the Salesforce Prompt Builder template used for generating responses
+  # This must match the exact DeveloperName with underscores (e.g., "Test_RAG_Optimization_SFR_v1")
+  # Do NOT use the display name with spaces - use the actual API name/DeveloperName
+  promptTemplateApiName: "YOUR_PROMPT_TEMPLATE_API_NAME"
+  # Search Index ID: The Salesforce record ID of the Data Cloud Search Index that contains the LLM parser prompt to be updated (e.g., "18lHu000000CgkHIAS")
+  searchIndexId: "YOUR_SEARCH_INDEX_ID"
+  # Refinement stage: "llm_parser" (optimize LLM parser prompt), "response_prompt" (optimize response prompt template), or "agentforce_agent" (optimize Agentforce agent)
+  refinementStage: "llm_parser"  # Options: "llm_parser", "response_prompt", or "agentforce_agent"
+  
+  # Stage-specific descriptions and focus text (used to populate {{REFINEMENT_STAGE_DESCRIPTION}}, {{REFINEMENT_STAGE_FOCUS}}, {{ROOT_CAUSE_GUIDANCE}}, and {{MODIFICATION_GUIDANCE}})
+  refinementStages:
+    llm_parser:
+      description: "LLM Parser Prompt Optimization"
+      focus: |
+        **CRITICAL**: Your primary task is to optimize the **LLM Parser Prompt**. This is the FIRST and MOST IMPORTANT component to optimize. 
+        
+        We will iterate on the parser multiple times, reindex the documents, and test again until we achieve maximum improvement. Only after the parser is optimized as much as possible should we consider the response prompt template.
+      rootCauseGuidance: |
+        **ROOT CAUSE ANALYSIS REQUIREMENTS** (for each FAIL):
+        
+        1. **Word-by-Word Comparison**: Compare the generated answer to the expected answer word-by-word. Identify exactly what was found, what was missing, and what should have been found.
+        
+        2. **Pipeline Failure Point**: Determine the EXACT failure point in the RAG pipeline:
+           - **Parser Failure**: Did the parser fail to extract structured data (tables, relationships, entities) from the source document during chunking? (Most common - focus here first)
+           - **Chunking Failure**: Did the parser extract it but create chunks that are too fragmented or lack context?
+           - **Relationship Failure**: Did the parser fail to extract relationships between entities (e.g., "Siemens 400A breaker" → "distribution section capacity")?
+           - **Context Preservation Failure**: Did the parser lose critical context (e.g., table headers, footnotes, comparative statements)?
+           - **Response Template Issue**: Only if you can definitively prove the parser extracted the information correctly but the response template failed to use it
+        
+        3. **Specific Details Required**:
+           - **What was found**: Quote the exact text from the generated answer
+           - **What was missing**: Quote the exact text from the expected answer that was not found
+           - **What should have been found**: Quote the exact text from the source PDF that contains the answer
+           - **Why it failed**: Explain the specific parser instruction (or lack thereof) that caused the failure
+        
+        4. **PDF Location Reference**: For each failure, reference the EXACT location in the PDF:
+           - Page number
+           - Section/table name
+           - Specific paragraph or table cell
+           - Quote the relevant source text
+        
+        5. **Failure Categorization**: Categorize each failure into one of these types:
+           - **Table Parsing Failure**: Parser didn't handle nested tables, multi-level headers, or table relationships
+           - **Footnote Processing Failure**: Parser didn't extract or link footnotes to their references
+           - **Comparative Statement Failure**: Parser didn't handle "if X then Y" or "X vs Y" statements
+           - **Entity Ambiguity Failure**: Parser didn't resolve ambiguity between similar entities (e.g., different breaker models)
+           - **Context Loss Failure**: Parser created chunks that lost critical context (e.g., removed table headers, lost section context)
+           - **Relationship Extraction Failure**: Parser didn't extract relationships between entities (e.g., "breaker X fits in section Y")
+           - **Other**: Specify the exact failure type
+        
+        6. **Comparison to Previous Cycles**: If this is not the first cycle, compare the current failure to previous cycles:
+           - Is this a NEW failure type? (parser introduced a new problem)
+           - Is this a PERSISTENT failure? (same issue across multiple cycles)
+           - Is this a REGRESSION? (was working before, now broken)
+           - What changed in the parser prompt that might have caused this?
+        
+        7. **For PASS cases**: Briefly explain why it passed - what parser instruction worked correctly?
+      modificationGuidance: |
+        **PROMPT MODIFICATION REQUIREMENTS** (for each FAIL):
+        
+        1. **Specific Prompt Text Changes**: For each failure, provide EXACT prompt text changes:
+           - **Add New Directive**: Provide the complete text of a new directive to add (not just a description)
+           - **Modify Existing Directive**: Quote the existing directive text, then provide the complete modified version
+           - **Clarify Ambiguous Instruction**: Identify the ambiguous instruction and provide the clarified version
+           - **Add Example**: Provide a concrete example to add to the prompt that demonstrates the desired behavior
+        
+        2. **Link to Root Cause**: Each modification MUST directly address a specific root cause identified in your analysis:
+           - "This modification addresses the table parsing failure identified in Q1..."
+           - "This change fixes the footnote processing issue in Q4..."
+        
+        3. **Specific Details Required**:
+           - **Location in Prompt**: Where should this change be made? (e.g., "Add after the 'Table Processing' section", "Modify the 'Chunking Rules' directive")
+           - **Vocabulary**: Use the EXACT vocabulary from the source PDF (e.g., if the PDF uses "distribution section", don't use "panel section")
+           - **Examples**: Include concrete examples from the source PDF that demonstrate the desired extraction behavior
+           - **Edge Cases**: Address specific edge cases that caused failures (e.g., "nested tables with 3+ levels", "footnotes that span multiple pages")
+        
+        4. **Error Severity**: Indicate the severity of each modification:
+           - **CRITICAL**: Fixes a failure that affects multiple questions or a fundamental parsing issue
+           - **IMPORTANT**: Fixes a specific failure that affects one or more questions
+           - **ENHANCEMENT**: Improves parsing quality but doesn't fix a specific failure
+        
+        5. **Organization**: Organize modifications into logical subsections:
+           - **Table Processing Enhancements**: All changes related to table parsing
+           - **Footnote Processing Enhancements**: All changes related to footnote extraction
+           - **Context Preservation Enhancements**: All changes related to preserving context
+           - **Relationship Extraction Enhancements**: All changes related to extracting relationships
+           - **Other Enhancements**: Any other improvements
+        
+        6. **Why This Helps**: For each modification, explain WHY it will fix the identified failure:
+           - "This directive ensures the parser extracts table headers at all nesting levels, which will fix the Q1 failure where nested headers were lost"
+           - "This example demonstrates how to handle comparative statements, which will fix the Q8 failure where 'if X then Y' logic was missed"
+        
+        7. **Focus on Patterns**: Identify patterns across failures:
+           - If multiple questions fail due to the same root cause, provide ONE comprehensive modification that addresses all of them
+           - Don't create separate modifications for each question if they share the same underlying issue
+        
+        8. **Complete Updated Prompt**: After analyzing all questions, provide the COMPLETE updated LLM parser prompt text:
+           - Include ALL existing directives (don't remove anything unless explicitly identified as problematic)
+           - Integrate ALL new modifications into the appropriate sections
+           - Ensure the prompt is coherent and well-organized
+           - The prompt should be production-ready, not just a list of suggestions
+        
+        9. **For PASS cases**: If a question passed, indicate "No modification needed" but briefly explain what parser instruction worked correctly
+        
+        10. **Response Template Changes**: Only suggest response template changes if:
+            - You can definitively prove the parser extracted the information correctly
+            - The response template failed to use the extracted information
+            - You've exhausted all reasonable parser improvements
+            - You explicitly state: "Parser appears optimized. Consider response template improvements."
+    response_prompt:
+      description: "Response Prompt Template Optimization"
+      focus: |
+        **CRITICAL**: The LLM Parser Prompt has been optimized to its maximum potential. Your primary task is now to optimize the **Response Prompt Template**. This template takes retrieved chunks and synthesizes answers. Focus on improving how the template structures and presents information from the retrieved context.
+      rootCauseGuidance: |
+        - **PRIMARY**: Is the response prompt template unclear? Not structuring information well? Missing context?
+        - **SECONDARY**: Could the LLM parser still be improved? (Only if template is clearly not the issue)
+        - **IGNORE**: Retrieval issues (not actionable)
+        - Be specific: What improvements are needed in how the template synthesizes answers?
+      modificationGuidance: |
+        - Provide SPECIFIC, ACTIONABLE improvements to the **Response Prompt Template**
+        - Be concrete: "Add instruction to structure answer as X", "Clarify that template should emphasize Y", "Add rule to handle Z"
+        - Focus on how the template uses retrieved chunks to generate better answers
+    agentforce_agent:
+      description: "Agentforce Agent Optimization"
+      focus: |
+        **CRITICAL**: Both the LLM Parser Prompt and Response Prompt Template have been optimized. Your primary task is now to optimize the **Agentforce Agent** configuration. This includes the agent's instructions, tools, and how it orchestrates the RAG system. Focus on improving agent behavior, decision-making, and interaction patterns.
+      rootCauseGuidance: |
+        - **PRIMARY**: Is the Agentforce agent configuration suboptimal? Poor instructions? Missing tools? Inefficient orchestration?
+        - **SECONDARY**: Could the parser or response template still be improved? (Only if agent is clearly not the issue)
+        - **IGNORE**: Retrieval issues (not actionable)
+        - Be specific: What improvements are needed in agent behavior, instructions, or tool usage?
+      modificationGuidance: |
+        - Provide SPECIFIC, ACTIONABLE improvements to the **Agentforce Agent** configuration
+        - Be concrete: "Update agent instructions to X", "Add tool Y for better Z", "Modify orchestration to handle W"
+        - Focus on how the agent uses the RAG system and makes decisions
+  
+  # Model configuration with fallback priority
+  prompt_builder_models:
+    primary: "sfdc_ai__DefaultBedrockAnthropicClaude45Sonnet"  # Anthropic Claude 4.5 Sonnet (default from prompt template - primary)
+    fallbacks:
+      - "sfdc_ai__DefaultOpenAIGPT5"  # GPT-5 (fallback 1)
+      - "sfdc_ai__DefaultOpenAIGPT4"  # GPT-4 (fallback 2)
+      - "sfdc_ai__DefaultGoogleGemini25Pro"  # Gemini 2.5 Pro (fallback 3)
+      - "sfdc_ai__DefaultGoogleGemini3Pro"  # Gemini 3 Pro (fallback 4)
+  
+  # Optional: Custom instructions for Gemini analysis (if not provided, the CUSTOM INSTRUCTIONS section will be omitted)
+  # customInstructions: |
+  #   Your custom instructions here...
+  
+  # Gemini Analysis Instructions Template
+  # Variables will be substituted: {{REFINEMENT_STAGE}}, {{LLM_PARSER_PROMPT}}, {{RESPONSE_PROMPT_TEMPLATE}}, {{RESPONSE_MODEL}}, {{AVAILABLE_MODELS}}, {{WORKSHEET_TEXT}}, {{CUSTOM_INSTRUCTIONS}}
+  geminiInstructions: |
+    # CUSTOM INSTRUCTIONS
+    {{CUSTOM_INSTRUCTIONS}}
+    
+    ---
+    
+    # ITERATIVE REFINEMENT PROCESS
+    
+    This is an **iterative refinement process**. This may be the first refinement cycle or a subsequent one. We will continue refining until no further improvements are possible. Each cycle involves:
+    1. Analyzing test results
+    2. Identifying optimization opportunities
+    3. Proposing improved prompts
+    4. Testing the improvements
+    5. Repeating until maximum quality is achieved
+    
+    **Current Refinement Stage**: {{REFINEMENT_STAGE}}
+    
+    # PRIMARY FOCUS: {{REFINEMENT_STAGE_DESCRIPTION}}
+    
+    {{REFINEMENT_STAGE_FOCUS}}
+    
+    **IMPORTANT WORKFLOW CONTEXT**: This is a **single analysis request** within a refinement cycle. Each cycle involves:
+    - **Previous steps** (already completed): Re-indexing documents (if LLM parser changed), invoking the prompt template with test questions, and collecting responses
+    - **This step** (your analysis): You are analyzing the results from the current cycle and providing recommendations
+    - **Subsequent steps** (after your analysis): Your recommendations will be implemented (e.g., updating the LLM parser prompt and re-indexing, or updating the response prompt template), and the cycle will repeat until optimal
+    
+    You will receive **one scoring/analysis request per cycle**. The re-indexing, prompt invocation, and prompt updates happen in other steps of the workflow.
+    
+    # TOKEN BUDGET
+    
+    **Token Budget**: You have access to Gemini 2.5 Pro's 1M token context window. Prioritize:
+    - **Complete PDF content analysis**: Analyze the full source document to understand context
+    - **Full parser prompt evaluation**: Review the entire current LLM parser prompt in detail
+    - **Comprehensive test result analysis**: Evaluate all test questions and their responses thoroughly
+    - **Detailed modification recommendations**: Provide specific, actionable improvements with complete prompt text
+    
+    Use the full context window effectively to provide thorough analysis and recommendations.
+    
+    # CONTEXT: RAG System Architecture
+    
+    You are analyzing a **Retrieval-Augmented Generation (RAG) system** built on Salesforce Data Cloud:
+    
+    1. **LLM Parser Prompt**: The search index uses an **LLM parser prompt** to break documents into semantic chunks. This parser tells the LLM how to parse and structure document content into searchable chunks. If the parser doesn't extract information correctly, the retriever can't find it, and the response will be wrong.
+    
+    2. **Retriever**: Searches indexed chunks and returns relevant ones. **Note: Retrieval configuration is not actionable/changeable in this workflow. If retrieval is the issue, we cannot fix it here.**
+    
+    3. **Response Prompt Template**: Takes retrieved chunks and synthesizes answers from the retrieved context.
+    
+    4. **Agentforce Agent**: Orchestrates the RAG system and uses tools to interact with the system.
+    
+    # SOURCE DOCUMENT (PDF)
+    
+    The PDF file has been uploaded and is available in the context above. This contains the correct answers. Use it to verify response accuracy.
+    
+    # LLM PARSER PROMPT (CURRENT VERSION - PRIMARY FOCUS)
+    
+    This is the prompt used by the LLM parser to break documents into chunks. **This is what we're optimizing.** Analyze whether this parser is:
+    - Missing critical information
+    - Creating poorly structured chunks
+    - Not extracting key relationships
+    - Failing to preserve context
+    - Not handling edge cases
+    
+    {{LLM_PARSER_PROMPT}}
+    
+    # RESPONSE PROMPT TEMPLATE (for reference only)
+    
+    This is the prompt template used to generate answers from retrieved chunks. It's shown for context, but **focus on parser optimization first**. Only suggest template changes if you're certain the parser cannot be improved further.
+    
+    **Current Model**: {{RESPONSE_MODEL}}
+    
+    **Available Models** (can be changed if needed):
+    {{AVAILABLE_MODELS}}
+    
+    **Response Prompt Template Content**:
+    
+    {{RESPONSE_PROMPT_TEMPLATE}}
+    
+    # TEST RESULTS
+    
+    Test questions, generated answers, and expected answers:
+    
+    {{WORKSHEET_TEXT}}
+    
+    # PREVIOUS CYCLE CONTEXT (if applicable)
+    
+    If this is not the first refinement cycle, you have access to previous cycle results. Use this to:
+    - Identify regressions (was working before, now broken)
+    - Identify persistent failures (same issue across multiple cycles)
+    - Identify improvements (was failing before, now passing)
+    - Understand what changes in the parser prompt might have caused current issues
+    - Avoid repeating modifications that didn't work in previous cycles
+    
+    # YOUR TASK: {{REFINEMENT_STAGE_TASK}}
+    
+    For each test result, analyze with **PRIMARY FOCUS on {{REFINEMENT_STAGE_FOCUS_TYPE}}**:
+    
+    1. **Pass/Fail**: Does the generated answer match the expected answer?
+       - Factual accuracy
+       - Completeness
+       - Format compliance
+       - Safety (no hallucinations)
+    
+    2. **Safety Score** (1-10): 
+       - 1 = Most conservative/safe
+       - 10 = Most risky/hallucinatory
+       - Did it fabricate data? Refuse when it should answer? Answer when it should refuse?
+    
+    3. **Root Cause/Explanation**: Determine WHY it passed/failed:
+       {{ROOT_CAUSE_GUIDANCE}}
+       - For each FAIL: Provide word-by-word comparison, identify exact pipeline failure point, reference PDF location (page/section), categorize failure type, and compare to previous cycles if applicable
+       - For each PASS: Briefly explain what parser instruction worked correctly
+    
+    4. **Prompt Modification Next Version**: **FOCUS HERE** - Provide specific, actionable improvements:
+       {{MODIFICATION_GUIDANCE}}
+       - For each FAIL: Provide exact prompt text changes (new directives, modifications, examples), link to root cause, specify location in prompt, use exact PDF vocabulary, explain why it helps
+       - For each PASS: Indicate "No modification needed" with brief explanation
+       - After all questions: Provide COMPLETE updated LLM parser prompt text (production-ready, not just suggestions)
+    
+    # OUTPUT FORMAT
+    
+    Return ONLY a JSON array (one object per row, same order as test results), followed by a separate JSON object with the proposed prompt:
+    
+    [
+      {{
+        "Pass/Fail": "✅ PASS" or "❌ FAIL",
+        "Safety Score": 1-10,
+        "Root Cause/Explanation": "Explanation focusing on LLM parser issues (or response template if parser is clearly not the issue). Ignore retrieval.",
+        "Prompt Modification Next Version": "Specific improvement suggestions to LLM Parser Prompt. Only suggest response template changes if parser is maximized."
+      }},
+      ...
+    ]
+    
+    {{OUTPUT_FORMAT_SECTION}}
+    
+    **IMPORTANT**: 
+    - The proposed prompt should be the same for all questions (since it's a single configuration). Provide the COMPLETE prompt text, not just suggestions.
+    - Include "StageStatus" ("optimized" or "needs_improvement") and "StageCompleteReason" in the proposed prompt object.
+    {{OUTPUT_FORMAT_IMPORTANT}}
+    
+    Return ONLY the JSON array, no other text.
+
+questions:
+  - number: "Q1"
+    text: "How many Siemens 400A breakers can I fit in a distribution section?"
+    expectedAnswer: |
+      - 4x chassis: 10 Thermal Magnetic breakers twin mounted or 5 Electronic breakers single-mounted
+      - 5x chassis: 14 Thermal Magnetic breakers twin mounted or 7 Electronic breakers single-mounted
+      - 6x chassis: 16 Thermal Magnetic breakers twin mounted or 8 Electronic breakers single-mounted
+      - 7x chassis: 20 Thermal Magnetic breakers twin mounted or 10 Electronic breakers single-mounted
+
+  - number: "Q3"
+    text: "If the panelboard needs to be wall-mounted, what UL listing is that?"
+    expectedAnswer: "Answer: UL67"
+
+  - number: "Q4"
+    text: "If the panelboard needs to be free-standing, what UL listing is that?"
+    expectedAnswer: "- Answer: UL891"
+
+  - number: "Q5"
+    text: "How many distribution sections do I need if I have (7) 800AF ETU breakers and (2) 400AF ETU breakers using Siemens?"
+    expectedAnswer: "two 7x distribution sections"
+
+  - number: "Q6"
+    text: "How tall is an ABB 5x CDP?"
+    expectedAnswer: "An ABB 5x CDP is 70.5\" tall for 600A frames or 78-90\" tall for 800-1200A frames."
+
+  - number: "Q7"
+    text: "How tall is a Siemens 800a?"
+    expectedAnswer: "A Siemens 5x CDP rated 800A is 78\" tall."
+
+  - number: "Q8"
+    text: "How much additional depth is required for a 1200a outdoor CDP?"
+    expectedAnswer: "An outdoor (Type 3R) 1200A CDP requires an additional +11\" vestibule depth compared to indoor Type 1."
+
+  - number: "Q9"
+    text: "How many vbars are required for 1200 amps?"
+    expectedAnswer: |
+      End-fed (MLO/MB): 1200 A needs 3 v-bars for SQ/SE or ABB: 2 v-bars for Siemens or Eaton
+      - Center-fed (with back-stabs): 1200 A uses 2 v-bars for most brands; Eaton CF can be done with 1 v-bar (per table) when paired with back-stabs.
+
+  - number: "Q10"
+    text: "What is the standard lug size for a 3va41?"
+    expectedAnswer: |
+      The standard lug size for a Siemens 3VA41 breaker is:
+      - 15-40A: (1) #14-8 AWG (lug kit 3VA91330JB10)
+      - 45-125A: (1) #8-3/0 AWG (lug kit 3VA91330JB11)
+
+  - number: "Q11"
+    text: "What communication protocol does 3va6 use?"
+    expectedAnswer: "Siemens 3VA6 breakers use Ethernet Modbus TCP as the default communication protocol, with optional support for Profibus DP, Profinet, and Modbus RTU if additional expansion modules are ordered."
+
+  - number: "Q12"
+    text: "How big is a 3va64 kit?"
+    expectedAnswer: "The 3VA64 hardware kit is the same physical size as the 3VA63 (400AF) kit but is rated for 600A. It is designed for single-mounting only, since the LCD on the 3VA63 would be blocked if twin-mounted."
+

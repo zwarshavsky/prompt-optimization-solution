@@ -21,7 +21,10 @@ scripts/python/live_outputs/
 live_outputs/
 *.xlsx
 *.json
-!inputs/prompt_optimization_input.yaml
+
+# Configuration files with sensitive data (DO NOT COMMIT)
+inputs/prompt_optimization_input.yaml
+# Use the .template file instead and copy it to create your local config
 
 # API Keys and Secrets (DO NOT COMMIT)
 scripts/python/gemini_config.py
@@ -34,8 +37,14 @@ scripts/python/explorer/
 scripts/python/debugging/
 archive_*/
 
+# Implementation plans and documentation (internal use)
+WORKER_IMPLEMENTATION_PLAN.md
+
 # Mockups (not needed for deployment)
 streamlit-mockup/
+
+# Documentation (internal use)
+docs/
 
 # IDE
 .vscode/
