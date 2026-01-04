@@ -88,12 +88,25 @@ def authenticate_soap(username: str, password: str, instance_url: str = None):
         raise Exception(f"Failed to parse SOAP response: {e}")
 
 
-def get_salesforce_credentials(username: str = None, password: str = None, instance_url: str = None):
+def get_salesforce_credentials(username: str = None, password: str = None, instance_url: str = None, config_dict: dict = None):
     """Get Salesforce instance URL and access token using SOAP authentication."""
+    # Priority 1: Use provided credentials directly
     if username and password:
         log_print(f"   🔑 Using provided credentials for user: {username}")
         return authenticate_soap(username, password, instance_url)
-    log_print(f"   🔑 Loading credentials from YAML config...")
+    
+    # Priority 2: Extract from config_dict (from database)
+    if config_dict:
+        salesforce_config = config_dict.get('configuration', {}).get('salesforce', {})
+        config_username = salesforce_config.get('username')
+        config_password = salesforce_config.get('password')
+        config_instance_url = salesforce_config.get('instanceUrl')
+        if config_username and config_password:
+            log_print(f"   🔑 Using credentials from config dict for user: {config_username}")
+            return authenticate_soap(config_username, config_password, config_instance_url)
+    
+    # Priority 3: Try loading from YAML file (for local development)
+    log_print(f"   🔑 Loading credentials from YAML config file...")
     try:
         yaml_path = Path(__file__).parent.parent.parent / "inputs" / "prompt_optimization_input.yaml"
         log_print(f"   📄 YAML path: {yaml_path}")
@@ -105,16 +118,18 @@ def get_salesforce_credentials(username: str = None, password: str = None, insta
             yaml_password = salesforce_config.get('password')
             yaml_instance_url = salesforce_config.get('instanceUrl')
             if yaml_username and yaml_password:
-                log_print(f"   ✅ Found credentials in YAML for user: {yaml_username}")
+                log_print(f"   ✅ Found credentials in YAML file for user: {yaml_username}")
                 return authenticate_soap(yaml_username, yaml_password, yaml_instance_url)
             else:
-                log_print("❌ Error: YAML config found but username/password not configured")
+                log_print("❌ Error: YAML config file found but username/password not configured")
                 log_print(f"   YAML path: {yaml_path}")
         else:
-            log_print(f"❌ Error: YAML config file not found: {yaml_path}")
+            log_print(f"   ⚠️  YAML config file not found: {yaml_path} (this is OK if using config_dict)")
     except Exception as e:
-        log_print(f"❌ Error reading YAML config: {e}")
+        log_print(f"   ⚠️  Error reading YAML config file: {e} (this is OK if using config_dict)")
+    
     log_print("❌ Error: Could not obtain Salesforce credentials")
+    log_print("   Please provide credentials via username/password parameters, config_dict, or YAML file")
     sys.exit(1)
 
 

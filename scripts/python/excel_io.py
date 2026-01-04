@@ -108,7 +108,7 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
 
     # Metadata rows at top (matching V7 format)
     log_print("   🔑 Getting Salesforce credentials for metadata...")
-    instance_url, access_token = get_salesforce_credentials()
+    instance_url, access_token = get_salesforce_credentials(config_dict=config_dict)
     log_print(f"   ✅ Connected: {instance_url}")
     org_username = config_dict.get('configuration', {}).get('salesforce', {}).get('username', 'Unknown') if config_dict else "Unknown"
     search_index_label = "Unknown"
@@ -139,7 +139,7 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
 
     log_print(f"\n🔮 Invoking Salesforce prompt '{prompt_template_name}' (API name) for each question...")
     log_print("   🔑 Getting Salesforce credentials...")
-    instance_url, access_token = get_salesforce_credentials()
+    instance_url, access_token = get_salesforce_credentials(config_dict=config_dict)
     log_print(f"   ✅ Connected to: {instance_url}")
 
     # Model from prompt template (display only)
