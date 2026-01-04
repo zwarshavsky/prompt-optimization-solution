@@ -25,7 +25,8 @@ from worker_utils import (
     mark_job_as_failed,
     mark_job_as_completed,
     update_job_progress,
-    update_job_heartbeat
+    update_job_heartbeat,
+    load_pdfs_from_db
 )
 
 try:
@@ -171,6 +172,22 @@ def process_job(run_id: str, resume_info: Optional[Dict[str, Any]] = None) -> bo
             print(f"[WORKER] ERROR: No YAML config found for job {run_id}", flush=True)
             mark_job_as_failed(run_id, "No YAML configuration found")
             return False
+        
+        # Load PDFs from database if they exist
+        pdf_files_restored = []
+        try:
+            pdf_files_restored = load_pdfs_from_db(run_id)
+            if pdf_files_restored:
+                print(f"[WORKER] Loaded {len(pdf_files_restored)} PDF file(s) from database", flush=True)
+                # Update pdfDirectory in config to point to restored PDFs directory
+                if pdf_files_restored:
+                    pdf_dir = str(Path(pdf_files_restored[0]).parent)
+                    if 'configuration' in yaml_config:
+                        yaml_config['configuration']['pdfDirectory'] = pdf_dir
+        except Exception as e:
+            print(f"[WORKER] Warning: Could not load PDFs from database: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
         
         # Prepare resume parameters if job was interrupted
         resume_params = {}

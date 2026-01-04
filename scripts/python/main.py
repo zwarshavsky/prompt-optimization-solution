@@ -1481,41 +1481,61 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
     else:
         log_print(f"  ℹ️  Using Gemini model: {gemini_model}")
     
-    # Get PDF directory from YAML and collect all PDF files
-    pdf_directory = config.get('pdfDirectory', '')
+    # Load PDFs from database first (if run_id provided and PDFs exist in DB)
+    # Then fallback to filesystem if not found in DB
     pdf_files = []
-    if pdf_directory:
-        pdf_dir_path = Path(pdf_directory)
-        if not pdf_dir_path.is_absolute():
-            # Resolve relative to script location
-            # First try app_data/uploads (where uploaded PDFs are stored)
-            app_data = Path(__file__).parent / "app_data" / "uploads"
-            if (app_data / pdf_directory).exists():
-                pdf_dir_path = app_data / pdf_directory
-            elif app_data.exists() and pdf_directory.startswith("uploads/"):
-                # Handle case where path includes "uploads/" prefix
-                pdf_dir_path = app_data / pdf_directory.replace("uploads/", "")
-            else:
-                # Fallback: try as relative to script
-                script_dir = Path(__file__).parent
-                pdf_dir_path = script_dir / pdf_directory
-        
-        if pdf_dir_path.exists() and pdf_dir_path.is_dir():
-            # Find all PDF files in directory
-            pdf_files = sorted(list(pdf_dir_path.glob('*.pdf')))
-            if pdf_files:
-                log_print(f"  📁 Found {len(pdf_files)} PDF file(s) in directory: {pdf_directory}")
+    if run_id:
+        try:
+            # Try worker_utils first (no Streamlit dependency), fallback to app
+            try:
+                from worker_utils import load_pdfs_from_db
+            except ImportError:
+                from app import load_pdfs_from_db
+            pdf_files_restored = load_pdfs_from_db(run_id)
+            if pdf_files_restored:
+                pdf_files = [Path(p) for p in pdf_files_restored]
+                log_print(f"  📁 Loaded {len(pdf_files)} PDF file(s) from database")
                 for pdf_file in pdf_files:
                     log_print(f"     - {pdf_file.name}")
+        except Exception as e:
+            log_print(f"  ⚠️  Could not load PDFs from database: {e}")
+            # Fall through to filesystem check
+    
+    # If no PDFs from database, try filesystem
+    if not pdf_files:
+        pdf_directory = config.get('pdfDirectory', '')
+        if pdf_directory:
+            pdf_dir_path = Path(pdf_directory)
+            if not pdf_dir_path.is_absolute():
+                # Resolve relative to script location
+                # First try app_data/uploads (where uploaded PDFs are stored)
+                app_data = Path(__file__).parent / "app_data" / "uploads"
+                if (app_data / pdf_directory).exists():
+                    pdf_dir_path = app_data / pdf_directory
+                elif app_data.exists() and pdf_directory.startswith("uploads/"):
+                    # Handle case where path includes "uploads/" prefix
+                    pdf_dir_path = app_data / pdf_directory.replace("uploads/", "")
+                else:
+                    # Fallback: try as relative to script
+                    script_dir = Path(__file__).parent
+                    pdf_dir_path = script_dir / pdf_directory
+            
+            if pdf_dir_path.exists() and pdf_dir_path.is_dir():
+                # Find all PDF files in directory
+                pdf_files = sorted(list(pdf_dir_path.glob('*.pdf')))
+                if pdf_files:
+                    log_print(f"  📁 Found {len(pdf_files)} PDF file(s) in directory: {pdf_directory}")
+                    for pdf_file in pdf_files:
+                        log_print(f"     - {pdf_file.name}")
+                else:
+                    log_print(f"  ⚠️  No PDF files found in directory: {pdf_directory}")
             else:
-                log_print(f"  ⚠️  No PDF files found in directory: {pdf_directory}")
+                log_print(f"  ⚠️  PDF directory not found: {pdf_directory}")
         else:
-            log_print(f"  ⚠️  PDF directory not found: {pdf_directory}")
-    else:
-        # Fallback to single PDF file from command line if directory not specified
-        if pdf_file and os.path.exists(pdf_file):
-            pdf_files = [Path(pdf_file)]
-            log_print(f"  📄 Using single PDF file from command line: {pdf_file}")
+            # Fallback to single PDF file from command line if directory not specified
+            if pdf_file and os.path.exists(pdf_file):
+                pdf_files = [Path(pdf_file)]
+                log_print(f"  📄 Using single PDF file from command line: {pdf_file}")
     
     # Call progress callback if provided
     if progress_callback:

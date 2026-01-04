@@ -8,6 +8,7 @@ import json
 import psycopg2
 from datetime import datetime
 from typing import List, Dict, Optional, Any
+from pathlib import Path
 
 
 def get_db_connection():
@@ -207,6 +208,67 @@ def mark_job_as_completed(run_id: str, results: Dict[str, Any]) -> bool:
         print(f"Error marking job as completed: {e}", flush=True)
         conn.rollback()
         return False
+    finally:
+        conn.close()
+
+
+def load_pdfs_from_db(run_id: str, output_dir: Optional[str] = None) -> List[str]:
+    """Load PDF files from Postgres database and save to filesystem"""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    
+    try:
+        import json
+        import base64
+        from pathlib import Path
+        
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT pdf_files 
+                FROM runs 
+                WHERE run_id = %s AND pdf_files IS NOT NULL
+            """, (run_id,))
+            
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return []
+            
+            pdf_data = row[0]
+            if isinstance(pdf_data, str):
+                pdf_data = json.loads(pdf_data)
+            
+            # Create output directory
+            if not output_dir:
+                # Use app_data/uploads directory
+                script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                uploads_dir = Path(script_dir) / "scripts" / "python" / "app_data" / "uploads"
+                uploads_dir.mkdir(parents=True, exist_ok=True)
+                output_dir = str(uploads_dir)
+            
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            
+            # Restore PDF files
+            restored_paths = []
+            for pdf_info in pdf_data:
+                filename = pdf_info.get('filename')
+                content_b64 = pdf_info.get('content')
+                
+                if filename and content_b64:
+                    pdf_file_path = output_path / filename
+                    # Convert base64 string back to bytes
+                    pdf_content = base64.b64decode(content_b64)
+                    with open(pdf_file_path, 'wb') as f:
+                        f.write(pdf_content)
+                    restored_paths.append(str(pdf_file_path))
+            
+            return restored_paths
+    except Exception as e:
+        print(f"Error loading PDF files from database: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return []
     finally:
         conn.close()
 

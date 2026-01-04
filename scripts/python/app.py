@@ -95,6 +95,7 @@ def init_database():
                     error_details TEXT,
                     excel_file_path TEXT,
                     excel_file_content BYTEA,
+                    pdf_files JSONB,
                     started_at TIMESTAMP,
                     completed_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -102,6 +103,19 @@ def init_database():
                     heartbeat_at TIMESTAMP,
                     checkpoint_info JSONB
                 )
+            """)
+            
+            # Add pdf_files column if it doesn't exist (for existing databases)
+            cur.execute("""
+                DO $$ 
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns 
+                        WHERE table_name='runs' AND column_name='pdf_files'
+                    ) THEN
+                        ALTER TABLE runs ADD COLUMN pdf_files JSONB;
+                    END IF;
+                END $$;
             """)
             
             # Add heartbeat_at column if it doesn't exist (for existing databases)
@@ -226,6 +240,106 @@ def load_excel_from_db(run_id: str, output_path: str = None) -> str:
     except Exception as e:
         print(f"Error loading Excel file from database: {e}")
         return None
+    finally:
+        conn.close()
+
+def save_pdfs_to_db(run_id: str, pdf_file_paths: List[str]) -> bool:
+    """Save PDF files to Postgres database as JSONB array"""
+    if not pdf_file_paths:
+        return False
+    
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        import psycopg2
+        import json
+        import base64
+        
+        pdf_data = []
+        for pdf_path in pdf_file_paths:
+            if os.path.exists(pdf_path):
+                with open(pdf_path, 'rb') as f:
+                    pdf_content = f.read()
+                # Store as base64 string for JSONB storage
+                pdf_data.append({
+                    'filename': os.path.basename(pdf_path),
+                    'content': base64.b64encode(pdf_content).decode('utf-8')
+                })
+        
+        if not pdf_data:
+            return False
+        
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE runs 
+                SET pdf_files = %s::jsonb, updated_at = CURRENT_TIMESTAMP
+                WHERE run_id = %s
+            """, (json.dumps(pdf_data), run_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error saving PDF files to database: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def load_pdfs_from_db(run_id: str, output_dir: str = None) -> List[str]:
+    """Load PDF files from Postgres database and save to filesystem"""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    
+    try:
+        import json
+        import base64
+        
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT pdf_files 
+                FROM runs 
+                WHERE run_id = %s AND pdf_files IS NOT NULL
+            """, (run_id,))
+            
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return []
+            
+            pdf_data = row[0]
+            if isinstance(pdf_data, str):
+                pdf_data = json.loads(pdf_data)
+            
+            # Create output directory
+            if not output_dir:
+                uploads_dir = get_app_data_dir() / "uploads"
+                uploads_dir.mkdir(exist_ok=True)
+                output_dir = str(uploads_dir)
+            
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            
+            # Restore PDF files
+            restored_paths = []
+            for pdf_info in pdf_data:
+                filename = pdf_info.get('filename')
+                content_b64 = pdf_info.get('content')
+                
+                if filename and content_b64:
+                    pdf_file_path = output_path / filename
+                    # Convert base64 string back to bytes
+                    pdf_content = base64.b64decode(content_b64)
+                    with open(pdf_file_path, 'wb') as f:
+                        f.write(pdf_content)
+                    restored_paths.append(str(pdf_file_path))
+            
+            return restored_paths
+    except Exception as e:
+        print(f"Error loading PDF files from database: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
     finally:
         conn.close()
 
@@ -1602,6 +1716,8 @@ if page == "Create New Run":
                 pdf_directory = st.session_state.uploaded_pdf_dir
                 
                 st.success(f"✅ Uploaded {len(uploaded_pdfs)} PDF file(s): {', '.join([f.name for f in uploaded_pdfs])}")
+                
+                # Note: PDFs will be saved to database when job is created
             
             st.caption("**Note:** PDF files must be uploaded to the server using the file uploader above.")
             st.markdown('</div>', unsafe_allow_html=True)
@@ -1942,6 +2058,14 @@ if page == "Create New Run":
                 st.session_state.runs.append(run_data)
                 st.session_state.current_run = run_data
                 st.session_state.show_create_modal = False
+                
+                # Save PDFs to database if they were uploaded
+                if st.session_state.get('uploaded_pdf_files'):
+                    pdf_files = st.session_state.uploaded_pdf_files
+                    if save_pdfs_to_db(run_id, pdf_files):
+                        print(f"[APP] Saved {len(pdf_files)} PDF file(s) to database for run {run_id}", flush=True)
+                    else:
+                        print(f"[APP] Warning: Failed to save PDF files to database for run {run_id}", flush=True)
                 
                 # Mark job as queued (worker will pick it up)
                 run_data['status'] = 'queued'
