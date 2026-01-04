@@ -2177,6 +2177,8 @@ elif page == "Jobs":
                 current_step_display = f"Cycle {current_cycle} - Initializing"
             elif status == 'running':
                 current_step_display = "Initializing..."
+            elif status in ['failed', 'completed', 'interrupted']:
+                current_step_display = "—"
             else:
                 current_step_display = "—"
             
@@ -2445,9 +2447,10 @@ elif page == "Jobs":
                         job_complete = any('Workflow Complete' in line or 'completed' in line.lower() for line in fresh_output_lines[-3:])
                         job_status = run.get('status', 'unknown')
                         is_completed = job_complete or job_status == 'completed'
+                        is_running = job_status == 'running'
                         
                         # Always show time since last update (only for running jobs)
-                        if not is_completed:
+                        if not is_completed and is_running:
                             if minutes_since_update > 0:
                                 time_message = f"⏱️ Last update: {minutes_since_update} minute{'s' if minutes_since_update != 1 else ''} ago"
                             else:
@@ -2461,7 +2464,7 @@ elif page == "Jobs":
                             
                             # Show warning if it's been too long (only for running jobs)
                             timeout_minutes = 120 if current_step == 1 else 10
-                            if time_since_update > timedelta(minutes=timeout_minutes):
+                            if is_running and time_since_update > timedelta(minutes=timeout_minutes):
                                 if current_step == 1:
                                     st.warning(f"⚠️ **No updates in {minutes_since_update} minutes.** Step 1 (Updating Search Index) can take up to an hour, but if it's been longer, the job may be stuck.")
                                 else:
@@ -2508,7 +2511,7 @@ elif page == "Jobs":
                     else:
                         # Step not determined yet, show cycle only
                         st.caption(f"📍 Current: Cycle {current_cycle} (Initializing step...)")
-                elif progress.get('status') == 'starting':
+                elif job_status == 'running' and progress.get('status') == 'starting':
                     st.caption("📍 Initializing workflow...")
                 
                 # Show Excel file if available
