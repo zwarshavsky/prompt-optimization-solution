@@ -286,6 +286,30 @@ def save_pdfs_to_db(run_id: str, pdf_file_paths: List[str]) -> bool:
     finally:
         conn.close()
 
+def kill_job(run_id: str) -> bool:
+    """Kill a running/queued job by marking it as failed"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE runs 
+                SET status = 'failed',
+                    error = 'Manually killed by user',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE run_id = %s AND status IN ('running', 'queued', 'interrupted')
+            """, (run_id,))
+            conn.commit()
+            return cur.rowcount > 0
+    except Exception as e:
+        print(f"Error killing job {run_id}: {e}", flush=True)
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
 def load_pdfs_from_db(run_id: str, output_dir: str = None) -> List[str]:
     """Load PDF files from Postgres database and save to filesystem"""
     conn = get_db_connection()
@@ -2368,7 +2392,7 @@ elif page == "Jobs":
         st.markdown("")
         
         # Table header
-        col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([2, 1.5, 1.5, 1.5, 2, 2, 2.5, 1])
+        col1, col2, col3, col4, col5, col6, col7, col8, col9 = st.columns([2, 1.5, 1.5, 1.5, 2, 2, 2.5, 1, 1])
         with col1:
             st.markdown("**Run ID**")
         with col2:
@@ -2385,6 +2409,8 @@ elif page == "Jobs":
             st.markdown("**Current Step**")
         with col8:
             st.markdown("**Excel**")
+        with col9:
+            st.markdown("**Actions**")
         
         st.markdown("---")
         
@@ -2392,9 +2418,10 @@ elif page == "Jobs":
         for run in filtered_runs:
             row_data = get_table_row_data(run)
             run_id = row_data['run_id']
+            job_status = run.get('status', 'unknown')  # Get actual status from run object
             
             # Table row
-            col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([2, 1.5, 1.5, 1.5, 2, 2, 2.5, 1])
+            col1, col2, col3, col4, col5, col6, col7, col8, col9 = st.columns([2, 1.5, 1.5, 1.5, 2, 2, 2.5, 1, 1])
             with col1:
                 st.markdown(f"`{run_id}`")
             with col2:
@@ -2411,6 +2438,21 @@ elif page == "Jobs":
                 st.markdown(row_data['current_step'])
             with col8:
                 st.markdown(row_data['excel'])
+            with col9:
+                # Kill button for running/queued/interrupted jobs
+                if job_status in ['running', 'queued', 'interrupted']:
+                    if st.button("🛑 Kill", key=f"kill_{run_id}", use_container_width=True, type="secondary"):
+                        # Kill the job
+                        if kill_job(run_id):
+                            st.success(f"✅ Job {run_id} killed")
+                            # Reload runs to reflect the change
+                            if 'runs' in st.session_state:
+                                del st.session_state.runs
+                            st.rerun()
+                        else:
+                            st.error(f"❌ Failed to kill job {run_id}")
+                else:
+                    st.markdown("—")
             
             # Expandable details section
             with st.expander(f"📋 View Details: {run_id}", expanded=False):
