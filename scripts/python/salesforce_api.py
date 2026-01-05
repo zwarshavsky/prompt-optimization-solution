@@ -21,11 +21,42 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import time as _time_for_agent_log
 
 # Helper function for immediate output flushing
 def log_print(*args, **kwargs):
     """Print with immediate flush for real-time terminal output"""
     print(*args, **kwargs, flush=True)
+
+# Agent debug logging (do not remove until post-fix verification)
+DEBUG_LOG_PATH = "/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/.cursor/debug.log"
+# Marker for stdout logs (Heroku)
+DEBUG_STDOUT_MARKER = "DEBUG_INVOCATION"
+
+def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
+    """Append NDJSON debug log (kept minimal; no secrets)."""
+    try:
+        payload = {
+            "sessionId": "debug-session",
+            "runId": data.get("runId", "unknown"),
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": {k: v for k, v in data.items() if k != "runId"},
+            "timestamp": int(_time_for_agent_log.time() * 1000),
+        }
+        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        # Never break primary flow on logging failure
+        pass
+
+def _agent_log_stdout(payload: dict):
+    """Emit NDJSON to stdout with marker for Heroku logs."""
+    try:
+        print(f"{DEBUG_STDOUT_MARKER} {json.dumps(payload, ensure_ascii=False)}", flush=True)
+    except Exception:
+        pass
 
 # ============================================================================
 # Auth + Prompt helpers (from utils.py)
@@ -205,6 +236,18 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
     else:
         models_to_try = ["Unknown"]
     
+    # #region agent log
+    payload_init = {
+        "runId": "unknown",
+        "prompt_name": prompt_name,
+        "models_to_try": models_to_try,
+        "question_len": len(question) if question else 0,
+        "question_preview": (question[:120] + "…") if question and len(question) > 120 else question,
+    }
+    _agent_log("H1", "salesforce_api.py:invoke_prompt:init", "invoke_prompt_start", payload_init)
+    _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H1", "location": "salesforce_api.py:invoke_prompt:init", "message": "invoke_prompt_start", "data": payload_init, "timestamp": int(_time_for_agent_log.time() * 1000)})
+    # #endregion
+
     session = requests.Session()
     
     for model_idx, current_model in enumerate(models_to_try):
@@ -236,6 +279,17 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                 if response.status_code == 200:
                     if result and len(result) > 0 and result[0].get('isSuccess', False):
                         prompt_response = result[0].get('outputValues', {}).get('promptResponse', '')
+                        # #region agent log
+                        payload_success = {
+                            "runId": "unknown",
+                            "model": current_model,
+                            "attempt": attempt,
+                            "model_idx": model_idx,
+                            "status_code": response.status_code,
+                        }
+                        _agent_log("H1", "salesforce_api.py:invoke_prompt:success", "invoke_prompt_success", payload_success)
+                        _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H1", "location": "salesforce_api.py:invoke_prompt:success", "message": "invoke_prompt_success", "data": payload_success, "timestamp": int(_time_for_agent_log.time() * 1000)})
+                        # #endregion
                         return (clean_html_response(prompt_response), current_model)
                     
                     errors = result[0].get('errors', []) if result and len(result) > 0 else []
@@ -257,6 +311,20 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                     if is_validation_exception and effective_max_retries < 5:
                         effective_max_retries = 5
                         log_print(f"      🔄 ValidationException detected - increasing retries to 5")
+                    # #region agent log
+                    payload_err200 = {
+                        "runId": "unknown",
+                        "model": current_model,
+                        "attempt": attempt,
+                        "model_idx": model_idx,
+                        "status_code": response.status_code,
+                        "error_msg": error_msg[:200],
+                        "is_validation_exception": is_validation_exception,
+                        "effective_max_retries": effective_max_retries,
+                    }
+                    _agent_log("H2", "salesforce_api.py:invoke_prompt:error200", "invoke_prompt_error_200", payload_err200)
+                    _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H2", "location": "salesforce_api.py:invoke_prompt:error200", "message": "invoke_prompt_error_200", "data": payload_err200, "timestamp": int(_time_for_agent_log.time() * 1000)})
+                    # #endregion
                     
                     is_provider_rate_limit = (
                         'provider rate limit' in error_msg_lower or 
@@ -306,6 +374,20 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                     if is_validation_exception and effective_max_retries < 5:
                         effective_max_retries = 5
                         log_print(f"      🔄 ValidationException detected - increasing retries to 5")
+                    # #region agent log
+                    payload_err_non200 = {
+                        "runId": "unknown",
+                        "model": current_model,
+                        "attempt": attempt,
+                        "model_idx": model_idx,
+                        "status_code": response.status_code,
+                        "error_msg": error_msg[:200],
+                        "is_validation_exception": is_validation_exception,
+                        "effective_max_retries": effective_max_retries,
+                    }
+                    _agent_log("H3", "salesforce_api.py:invoke_prompt:errorNon200", "invoke_prompt_error_non200", payload_err_non200)
+                    _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H3", "location": "salesforce_api.py:invoke_prompt:errorNon200", "message": "invoke_prompt_error_non200", "data": payload_err_non200, "timestamp": int(_time_for_agent_log.time() * 1000)})
+                    # #endregion
                     
                     is_provider_rate_limit = (
                         'provider rate limit' in error_msg_lower or 
