@@ -2191,20 +2191,21 @@ elif page == "Jobs":
         if filter_option == "All":
             filtered_runs.append(r)
         elif filter_option == "Running":
-            if r['status'] == 'running':
-                # Filter out likely killed jobs
-                output_lines = r.get('output_lines', [])
-                progress = r.get('progress', {})
-                if not output_lines and progress.get('status') == 'cycle_start' and progress.get('step') == 0:
-                    from datetime import datetime, timedelta
-                    started_at = r.get('started_at')
-                    if started_at:
-                        if isinstance(started_at, str):
-                            started_at = datetime.fromisoformat(started_at)
-                        if datetime.now() - started_at > timedelta(minutes=10):
-                            r['status'] = 'completed'
-                            save_runs(st.session_state.runs)
-                            continue
+            if r['status'] in ['running', 'queued', 'interrupted']:
+                # Filter out likely killed jobs (only for running status)
+                if r['status'] == 'running':
+                    output_lines = r.get('output_lines', [])
+                    progress = r.get('progress', {})
+                    if not output_lines and progress.get('status') == 'cycle_start' and progress.get('step') == 0:
+                        from datetime import datetime, timedelta
+                        started_at = r.get('started_at')
+                        if started_at:
+                            if isinstance(started_at, str):
+                                started_at = datetime.fromisoformat(started_at)
+                            if datetime.now() - started_at > timedelta(minutes=10):
+                                r['status'] = 'completed'
+                                save_runs(st.session_state.runs)
+                                continue
                 filtered_runs.append(r)
         elif filter_option == "Completed":
             if r['status'] == 'completed':
@@ -2256,6 +2257,12 @@ elif page == "Jobs":
             elif status == 'failed':
                 status_icon = "❌"
                 status_label = "Failed"
+            elif status == 'queued':
+                status_icon = "⏳"
+                status_label = "Queued"
+            elif status == 'interrupted':
+                status_icon = "⏸️"
+                status_label = "Interrupted"
             else:
                 status_icon = "❓"
                 status_label = "Unknown"
@@ -2466,7 +2473,7 @@ elif page == "Jobs":
                 }
                 
                 # Build detailed status text
-                if progress.get('status') == 'starting':
+                if job_status == 'running' and progress.get('status') == 'starting':
                     status_text = "Initializing workflow..."
                 elif progress.get('status') == 'cycle_start':
                     status_text = f"Cycle {current_cycle} - Starting"
@@ -2612,7 +2619,7 @@ elif page == "Jobs":
                             st.code('\n'.join(fresh_output_lines_expanded), language='text')
                 else:
                     # Show current progress info even if no output lines yet
-                    if progress.get('status') == 'starting':
+                    if job_status == 'running' and progress.get('status') == 'starting':
                         st.info("ℹ️ Workflow is initializing...")
                     elif progress.get('status') == 'cycle_start':
                         st.info(f"ℹ️ Starting Cycle {current_cycle}...")
