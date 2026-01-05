@@ -1621,12 +1621,84 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
         log_print("\n" + "-"*80)
         log_print("RESUME MODE: Loading checkpoint state")
         log_print("-"*80)
-        state = load_state(resume_from_step=resume_from_step, resume_from_cycle=resume_from_cycle)
+        
+        # First, try to load from database checkpoint_info if run_id is provided
+        if run_id:
+            try:
+                from worker_utils import get_db_connection
+                try:
+                    import psycopg2.extras
+                except ImportError:
+                    # Fallback if psycopg2.extras not available
+                    import psycopg2
+                    psycopg2.extras = None
+                conn = get_db_connection()
+                if conn:
+                    try:
+                        # Use RealDictCursor if available, otherwise regular cursor
+                        if psycopg2.extras:
+                            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                        else:
+                            cur = conn.cursor()
+                        try:
+                            cur.execute("""
+                                SELECT checkpoint_info, config, excel_file_path, progress
+                                FROM runs 
+                                WHERE run_id = %s
+                            """, (run_id,))
+                            row = cur.fetchone()
+                            if row:
+                                # Handle both dict (RealDictCursor) and tuple (regular cursor)
+                                if isinstance(row, dict):
+                                    checkpoint = row.get('checkpoint_info')
+                                    excel_file_path = row.get('excel_file_path')
+                                    config_data = row.get('config')
+                                else:
+                                    # Tuple: (checkpoint_info, config, excel_file_path, progress)
+                                    checkpoint = row[0] if len(row) > 0 else None
+                                    config_data = row[1] if len(row) > 1 else None
+                                    excel_file_path = row[2] if len(row) > 2 else None
+                                
+                                if checkpoint:
+                                log_print(f"  ✅ Found checkpoint in database: Cycle {checkpoint.get('cycle')}, Step {checkpoint.get('step')}")
+                                
+                                # Build state-like structure from checkpoint_info
+                                state = {
+                                    'cycle_number': checkpoint.get('cycle', 1),
+                                    'last_completed_step': checkpoint.get('step', 0) - 1 if checkpoint.get('step', 0) > 0 else 0,
+                                    'run_id': run_id,
+                                    'excel_file': excel_file_path or excel_file,
+                                    'yaml_config_snapshot': config_data if config_data else yaml_config,
+                                    '_from_database_checkpoint': True  # Flag to skip validation
+                                }
+                                
+                                # Override resume parameters from checkpoint
+                                if checkpoint.get('cycle'):
+                                    resume_from_cycle = checkpoint.get('cycle')
+                                if checkpoint.get('step'):
+                                    resume_from_step = checkpoint.get('step')
+                                
+                                log_print(f"  ✅ Resuming from Cycle {resume_from_cycle}, Step {resume_from_step}")
+                            else:
+                                log_print("  ℹ️  No checkpoint_info found in database, trying state files...")
+                        finally:
+                            cur.close()
+                    finally:
+                        conn.close()
+            except Exception as e:
+                log_print(f"  ⚠️  Warning: Could not load checkpoint from database: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Fallback to state files if database checkpoint not found
+        if not state:
+            state = load_state(resume_from_step=resume_from_step, resume_from_cycle=resume_from_cycle, run_id=run_id)
         
         if not state:
-            log_print("  ❌ ERROR: No state file found. Cannot resume.")
+            log_print("  ❌ ERROR: No checkpoint found in database or state files. Cannot resume.")
             log_print("  💡 Tip: Run without --resume to start a new workflow")
-            sys.exit(1)
+            # Don't sys.exit() - let the caller handle it (worker will mark as failed)
+            raise RuntimeError("Cannot resume: No checkpoint found in database or state files")
         
         # Use frozen YAML config from state (not from file)
         if 'yaml_config_snapshot' in state:
@@ -1635,20 +1707,30 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
             config = yaml_config.get('configuration', {})
             questions_config = yaml_config.get('questions', [])
         else:
-            log_print("  ❌ ERROR: No frozen YAML config in state")
-            sys.exit(1)
+            # If no snapshot in state, use the yaml_config_dict that was passed in
+            log_print("  ℹ️  No frozen YAML config in state, using provided config")
+            # yaml_config is already set from function parameter
         
-        # Use run_id and excel_file from state
-        run_id = state.get('run_id')
+        # Use run_id and excel_file from state (if available)
+        if state.get('run_id'):
+            run_id = state.get('run_id')
         state_excel_file = state.get('excel_file', excel_file)
-        is_valid, validation_msg = validate_state(state, state_excel_file)
-        if not is_valid:
-            log_print(f"  ❌ ERROR: State validation failed: {validation_msg}")
-            log_print("  💡 Tip: Use --clean-state to start fresh")
-            sys.exit(1)
         
-        # Update excel_file to use resolved path from validation
-        excel_file = state_excel_file
+        # Validate state (skip validation if loading from database checkpoint - Excel file might not exist yet)
+        if state.get('_from_database_checkpoint'):
+            log_print("  ℹ️  Skipping state validation (loaded from database checkpoint)")
+            # Excel file path from database should be valid
+            if state_excel_file and state_excel_file != excel_file:
+                excel_file = state_excel_file
+        else:
+            is_valid, validation_msg = validate_state(state, state_excel_file)
+            if not is_valid:
+                log_print(f"  ❌ ERROR: State validation failed: {validation_msg}")
+                log_print("  💡 Tip: Use --clean-state to start fresh")
+                raise RuntimeError(f"State validation failed: {validation_msg}")
+            
+            # Update excel_file to use resolved path from validation
+            excel_file = state_excel_file
         
         log_print(f"  ✅ State loaded: Cycle {state.get('cycle_number')}, Last step: {state.get('last_completed_step')}")
         log_print(f"  📄 Sheet: {state.get('sheet_name')}")
