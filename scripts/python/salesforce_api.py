@@ -356,8 +356,8 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         log_print(f"      ⏳ ValidationException retry {attempt + 1}/{effective_max_retries} (waiting {wait_time}s)...")
                         time.sleep(wait_time)
                         continue
-                    if is_validation_exception and attempt >= effective_max_retries:
-                        break  # try next model
+                    if is_validation_exception and attempt >= effective_max_retries - 1:
+                        break  # try next model after exhausting retries
                     
                     return (f"Error: {error_msg[:200]}", current_model)
                 else:  # response.status_code != 200
@@ -421,8 +421,8 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         log_print(f"      ⏳ ValidationException retry {attempt + 1}/{effective_max_retries} (waiting {wait_time}s)...")
                         time.sleep(wait_time)
                         continue
-                    if is_validation_exception and attempt >= effective_max_retries:
-                        break  # try next model
+                    if is_validation_exception and attempt >= effective_max_retries - 1:
+                        break  # try next model after exhausting retries
                     
                     return (f"API Error: {response.status_code}, {error_msg[:200]}", current_model)
             except requests.exceptions.RequestException as e:
