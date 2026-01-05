@@ -1660,25 +1660,25 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                                     excel_file_path = row[2] if len(row) > 2 else None
                                 
                                 if checkpoint:
-                                log_print(f"  ✅ Found checkpoint in database: Cycle {checkpoint.get('cycle')}, Step {checkpoint.get('step')}")
-                                
-                                # Build state-like structure from checkpoint_info
-                                state = {
-                                    'cycle_number': checkpoint.get('cycle', 1),
-                                    'last_completed_step': checkpoint.get('step', 0) - 1 if checkpoint.get('step', 0) > 0 else 0,
-                                    'run_id': run_id,
-                                    'excel_file': excel_file_path or excel_file,
-                                    'yaml_config_snapshot': config_data if config_data else yaml_config,
-                                    '_from_database_checkpoint': True  # Flag to skip validation
-                                }
-                                
-                                # Override resume parameters from checkpoint
-                                if checkpoint.get('cycle'):
-                                    resume_from_cycle = checkpoint.get('cycle')
-                                if checkpoint.get('step'):
-                                    resume_from_step = checkpoint.get('step')
-                                
-                                log_print(f"  ✅ Resuming from Cycle {resume_from_cycle}, Step {resume_from_step}")
+                                    log_print(f"  ✅ Found checkpoint in database: Cycle {checkpoint.get('cycle')}, Step {checkpoint.get('step')}")
+                                    
+                                    # Build state-like structure from checkpoint_info
+                                    state = {
+                                        'cycle_number': checkpoint.get('cycle', 1),
+                                        'last_completed_step': checkpoint.get('step', 0) - 1 if checkpoint.get('step', 0) > 0 else 0,
+                                        'run_id': run_id,
+                                        'excel_file': excel_file_path or excel_file,
+                                        'yaml_config_snapshot': config_data if config_data else yaml_config,
+                                        '_from_database_checkpoint': True  # Flag to skip validation
+                                    }
+                                    
+                                    # Override resume parameters from checkpoint
+                                    if checkpoint.get('cycle'):
+                                        resume_from_cycle = checkpoint.get('cycle')
+                                    if checkpoint.get('step'):
+                                        resume_from_step = checkpoint.get('step')
+                                    
+                                    log_print(f"  ✅ Resuming from Cycle {resume_from_cycle}, Step {resume_from_step}")
                             else:
                                 log_print("  ℹ️  No checkpoint_info found in database, trying state files...")
                         finally:
