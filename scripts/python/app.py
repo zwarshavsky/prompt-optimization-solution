@@ -2286,7 +2286,8 @@ elif page == "Jobs":
                 filtered_runs.append(r)
     
     # Sort by started_at (newest first)
-    filtered_runs.sort(key=lambda x: x.get('started_at', ''), reverse=True)
+    # Handle None values by treating them as earliest possible date (sort last)
+    filtered_runs.sort(key=lambda x: x.get('started_at') or datetime.min, reverse=True)
     
     if filtered_runs:
         # Helper function to extract status info for table display

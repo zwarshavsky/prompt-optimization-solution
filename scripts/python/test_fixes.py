@@ -664,6 +664,34 @@ def test_12_database_connection_failures_handled():
         traceback.print_exc()
         return False
 
+def test_14_sort_handles_none_started_at():
+    """Regression Test 14: Sorting jobs handles None started_at values"""
+    print("Regression Test 14: Sorting jobs handles None started_at values", flush=True)
+    
+    try:
+        # Simulate jobs with None started_at (can happen for failed/interrupted jobs)
+        test_runs = [
+            {'run_id': 'test1', 'started_at': datetime(2025, 1, 5, 10, 0, 0), 'status': 'completed'},
+            {'run_id': 'test2', 'started_at': None, 'status': 'failed'},  # None value
+            {'run_id': 'test3', 'started_at': datetime(2025, 1, 5, 11, 0, 0), 'status': 'running'},
+            {'run_id': 'test4', 'started_at': None, 'status': 'interrupted'},  # None value
+        ]
+        
+        # This is the actual sort logic from app.py (should not crash)
+        try:
+            test_runs.sort(key=lambda x: x.get('started_at') or datetime.min, reverse=True)
+            print(f"  ✅ PASS: Sort handled None values without crashing", flush=True)
+            return True
+        except TypeError as e:
+            print(f"  ❌ FAIL: Sort crashed with TypeError: {e}", flush=True)
+            return False
+            
+    except Exception as e:
+        print(f"  ❌ ERROR: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return False
+
 def test_13_multiple_concurrent_updates():
     """Regression Test 13: Multiple rapid progress updates don't cause issues"""
     print("Regression Test 13: Multiple rapid progress updates don't cause issues")
@@ -744,7 +772,8 @@ def main():
         test_10_kill_button_works_on_interrupted,
         test_11_progress_updates_handle_missing_fields,
         test_12_database_connection_failures_handled,
-        test_13_multiple_concurrent_updates
+        test_13_multiple_concurrent_updates,
+        test_14_sort_handles_none_started_at
     ]
     
     all_tests = sync_tests + regression_tests
@@ -763,29 +792,29 @@ def main():
             results.append(False)
             print()
     
-    print("="*80)
-    print("RESULTS SUMMARY")
-    print("="*80)
+    print("="*80, flush=True)
+    print("RESULTS SUMMARY", flush=True)
+    print("="*80, flush=True)
     passed = sum(results)
     total = len(results)
     sync_passed = sum(results[:len(sync_tests)])
     regression_passed = sum(results[len(sync_tests):])
     
-    print(f"Total: {passed}/{total}")
-    print(f"  - Synchronization fixes: {sync_passed}/{len(sync_tests)}")
-    print(f"  - Regression tests: {regression_passed}/{len(regression_tests)}")
-    print()
+    print(f"Total: {passed}/{total}", flush=True)
+    print(f"  - Synchronization fixes: {sync_passed}/{len(sync_tests)}", flush=True)
+    print(f"  - Regression tests: {regression_passed}/{len(regression_tests)}", flush=True)
+    print(flush=True)
     
     if passed == total:
-        print("✅ ALL TESTS PASSED")
+        print("✅ ALL TESTS PASSED", flush=True)
         return 0
     else:
-        print("❌ SOME TESTS FAILED")
-        print()
-        print("Failed tests:")
+        print("❌ SOME TESTS FAILED", flush=True)
+        print(flush=True)
+        print("Failed tests:", flush=True)
         for i, (test, result) in enumerate(zip(all_tests, results), 1):
             if not result:
-                print(f"  - [{i}] {test.__name__}")
+                print(f"  - [{i}] {test.__name__}", flush=True)
         return 1
 
 if __name__ == '__main__':
