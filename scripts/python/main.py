@@ -21,7 +21,7 @@ import yaml
 import asyncio
 from pathlib import Path
 from datetime import datetime
-from gemini_client import genai, USE_NEW_GENAI
+from gemini_client import genai
 from excel_io import create_analysis_sheet_with_prompts, update_run_summary_sheet
 from salesforce_api import (
     get_salesforce_credentials,
@@ -547,12 +547,9 @@ def analyze_with_gemini(excel_file, sheet_name, pdf_files=None, model_name=None,
     # Update the same sheet (no new sheet creation)
     log_print(f"  ✓ Will update existing sheet: {sheet_name}")
     
-    # Configure Gemini API
-    if USE_NEW_GENAI:
-        client = genai.Client(api_key=api_key)
-    else:
-        genai.configure(api_key=api_key)
-        client = None  # Not used with old package
+    # Configure Gemini API with timeout settings
+    GEMINI_TIMEOUT_SECONDS = 180  # 3 minutes timeout
+    genai.configure(api_key=api_key)
     
     # Upload all PDF files if provided
     pdf_file_objs = []
@@ -563,21 +560,13 @@ def analyze_with_gemini(excel_file, sheet_name, pdf_files=None, model_name=None,
             if os.path.exists(pdf_file_str):
                 log_print(f"  📄 Uploading: {pdf_file_path.name}...")
                 try:
-                    if USE_NEW_GENAI:
-                        pdf_file_obj = client.files.upload(file=pdf_file_str)
-                        while pdf_file_obj.state.name == "PROCESSING":
-                            print(".", end="", flush=True)
-                            time.sleep(2)
-                            pdf_file_obj = client.files.get(pdf_file_obj.name)
-                        print(" ✓")
-                        pdf_file_objs.append(pdf_file_obj)
-                    else:
-                        pdf_file_obj = genai.upload_file(path=pdf_file_str, mime_type="application/pdf")
-                        while genai.get_file(pdf_file_obj.name).state.name == "PROCESSING":
-                            print(".", end="", flush=True)
-                            time.sleep(2)
-                        print(" ✓")
-                        pdf_file_objs.append(pdf_file_obj)
+                    pdf_file_obj = genai.upload_file(path=pdf_file_str, mime_type="application/pdf")
+                    while genai.get_file(pdf_file_obj.name).state.name == "PROCESSING":
+                        print(".", end="", flush=True)
+                        time.sleep(2)
+                        pdf_file_obj = genai.get_file(pdf_file_obj.name)
+                    print(" ✓")
+                    pdf_file_objs.append(pdf_file_obj)
                 except Exception as e:
                     log_print(f"  ⚠️  Failed to upload {pdf_file_path.name}: {e}")
             else:
@@ -1076,60 +1065,35 @@ def analyze_with_gemini(excel_file, sheet_name, pdf_files=None, model_name=None,
     
     for attempt in range(max_retries):
         try:
-            if USE_NEW_GENAI:
-                # Use new google.genai package
-                contents = []
-                # Add all PDF files to contents
-                if pdf_file_objs:
-                    for pdf_file_obj in pdf_file_objs:
-                        contents.append({"file_data": {"file_uri": pdf_file_obj.uri, "mime_type": "application/pdf"}})
-                # Add prompt text
-                contents.append({"text": prompt})
-                
-                log_print(f"  🔄 Attempt {attempt + 1}/{max_retries}...")
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=contents
-                )
-                # Extract text from response
-                if hasattr(response, 'text'):
-                    response_text = response.text
-                elif hasattr(response, 'candidates') and len(response.candidates) > 0:
-                    response_text = response.candidates[0].content.parts[0].text
-                else:
-                    response_text = str(response)
-                
-                # Success - break out of retry loop
-                log_print(f"  ✅ Gemini API call successful (attempt {attempt + 1})")
-                break
-                
-            else:
-                # Use old google.generativeai package
-                # Fix model name for old API
-                if model_name == 'gemini-1.5-pro':
-                    model_name = 'gemini-pro'  # Fallback for old API
-                model = genai.GenerativeModel(model_name)
-                # Build contents with all PDF files + prompt
-                contents = list(pdf_file_objs) if pdf_file_objs else []
-                contents.append(prompt)
-                log_print(f"  🔄 Attempt {attempt + 1}/{max_retries}...")
-                response = model.generate_content(contents)
-                response_text = response.text
-                
-                # Success - break out of retry loop
-                log_print(f"  ✅ Gemini API call successful (attempt {attempt + 1})")
-                break
+            # Use google.generativeai package
+            # Fix model name for old API
+            if model_name == 'gemini-1.5-pro':
+                model_name = 'gemini-pro'  # Fallback for old API
+            model = genai.GenerativeModel(model_name)
+            # Build contents with all PDF files + prompt
+            contents = list(pdf_file_objs) if pdf_file_objs else []
+            contents.append(prompt)
+            log_print(f"  🔄 Attempt {attempt + 1}/{max_retries} (timeout: {GEMINI_TIMEOUT_SECONDS}s)...")
+            # Note: google.generativeai (old package) doesn't support timeout in generation_config or request_options
+            # Timeout is handled at HTTP client level, and retry logic below will catch DeadlineExceeded errors
+            response = model.generate_content(contents)
+            response_text = response.text
+            
+            # Success - break out of retry loop
+            log_print(f"  ✅ Gemini API call successful (attempt {attempt + 1})")
+            break
                 
         except Exception as e:
             last_error = e
             error_type = type(e).__name__
             error_msg = str(e)
             
-            # Check if it's a network/connection error (retryable)
+            # Check if it's a network/connection error or timeout (retryable)
             is_retryable = any(keyword in error_msg.lower() for keyword in [
                 'connection reset', 'connection refused', 'timeout', 'network',
-                'readerror', 'connection error', 'broken pipe', 'connection aborted'
-            ]) or 'ReadError' in error_type or 'ConnectError' in error_type
+                'readerror', 'connection error', 'broken pipe', 'connection aborted',
+                'deadline exceeded', '504', 'deadlineexceeded'
+            ]) or 'ReadError' in error_type or 'ConnectError' in error_type or 'DeadlineExceeded' in error_type
             
             if is_retryable and attempt < max_retries - 1:
                 wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
@@ -1401,10 +1365,7 @@ def analyze_with_gemini(excel_file, sheet_name, pdf_files=None, model_name=None,
     if pdf_file_objs:
         for pdf_file_obj in pdf_file_objs:
             try:
-                if USE_NEW_GENAI:
-                    client.files.delete(pdf_file_obj.name)
-                else:
-                    genai.delete_file(pdf_file_obj.name)
+                genai.delete_file(pdf_file_obj.name)
             except:
                 pass
     

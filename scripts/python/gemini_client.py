@@ -9,16 +9,10 @@ import json
 import time
 from pathlib import Path
 
-try:
-    import google.genai as genai
-    USE_NEW_GENAI = True
-except ImportError:
-    import google.generativeai as genai
-    USE_NEW_GENAI = False
+import google.generativeai as genai
 
 __all__ = [
     "genai",
-    "USE_NEW_GENAI",
 ]
 
 
