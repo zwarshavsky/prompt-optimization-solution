@@ -1493,9 +1493,13 @@ async def update_search_index_prompt(
             max_rebuild_attempts = 3  # Limit rebuild attempts to prevent infinite loops
             
             try:
-                # Get access token via SOAP authentication (from YAML or CLI fallback)
+                # Get access token via SOAP authentication (use provided credentials)
                 from salesforce_api import get_salesforce_credentials
-                api_instance_url, access_token = get_salesforce_credentials()
+                api_instance_url, access_token = get_salesforce_credentials(
+                    username=username,
+                    password=password,
+                    instance_url=instance_url
+                )
                 
                 import urllib.request
                 api_url = f"{api_instance_url}/services/data/v65.0/ssot/search-index/{search_index_id}"
