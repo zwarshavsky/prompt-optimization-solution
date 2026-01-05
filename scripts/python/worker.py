@@ -166,7 +166,6 @@ def process_job(run_id: str, resume_info: Optional[Dict[str, Any]] = None) -> bo
             return False
         
         # Load job config from database
-        from worker_utils import get_db_connection
         conn = get_db_connection()
         if not conn:
             print(f"[WORKER] ERROR: Could not connect to database", flush=True)
