@@ -430,7 +430,7 @@ def load_runs() -> List[Dict]:
             return []
     return []
 
-def detect_and_mark_dead_jobs(stale_threshold_minutes: int = 2) -> int:
+def detect_and_mark_dead_jobs(stale_threshold_minutes: int = 30) -> int:
     """
     Detect jobs that haven't updated heartbeat in > threshold minutes and mark them as failed.
     Returns count of dead jobs marked.

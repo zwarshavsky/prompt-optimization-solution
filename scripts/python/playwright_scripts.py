@@ -17,6 +17,8 @@ import subprocess
 import json
 import urllib.request
 import yaml
+import os
+import psycopg2
 
 async def update_search_index_prompt(
     username: str,
@@ -24,6 +26,7 @@ async def update_search_index_prompt(
     instance_url: str,
     search_index_id: str,
     new_prompt: str,
+    run_id: str = None,
     capture_network: bool = False,
     take_screenshots: bool = False,
     headless: bool = False,
@@ -54,6 +57,26 @@ async def update_search_index_prompt(
         await page.screenshot(path=str(screenshot_path), full_page=True)
         print(f"   📸 Screenshot saved: {screenshot_path.name}")
         return screenshot_path
+    
+    def should_abort():
+        """Check DB status for kill; return True to abort if not running."""
+        if not run_id:
+            return False
+        try:
+            url = os.environ.get("DATABASE_URL")
+            if not url:
+                return False
+            conn = psycopg2.connect(url)
+            cur = conn.cursor()
+            cur.execute("select status from runs where run_id=%s", (run_id,))
+            row = cur.fetchone()
+            conn.close()
+            if row and row[0] not in ('running', 'queued', 'interrupted'):
+                print(f"   ❌ Kill detected for run {run_id} (status={row[0]}), aborting Playwright flow.")
+                return True
+        except Exception as e:
+            print(f"   ⚠️ Kill check failed: {e}")
+        return False
     
     async with async_playwright() as p:
         # Launch browser with visible window - normal size
@@ -1487,11 +1510,16 @@ async def update_search_index_prompt(
                     print("\n⚠️  No PUT/POST requests were captured.")
             
             # Now poll API status until it changes to SUBMITTED (or another terminal state)
+            # Emit keepalive heartbeats/logs during long waits to prevent false dead-job detection.
             print("\n📊 Polling Search Index status via API (waiting for status to update to SUBMITTED)...")
             await asyncio.sleep(5)  # Initial wait before first check
             
             rebuild_attempts = 0
             max_rebuild_attempts = 3  # Limit rebuild attempts to prevent infinite loops
+            
+            # Keepalive settings
+            keepalive_interval_seconds = 180  # 3 minutes
+            last_keepalive = datetime.utcnow()
             
             try:
                 # Get access token via SOAP authentication (use provided credentials)
@@ -1511,6 +1539,9 @@ async def update_search_index_prompt(
                 submitted_reached = False
                 
                 for attempt in range(max_attempts_phase1):
+                    if should_abort():
+                        status_check_success = False
+                        break
                     req = urllib.request.Request(api_url)
                     req.add_header('Authorization', f'Bearer {access_token}')
                     req.add_header('Content-Type', 'application/json')
@@ -1586,6 +1617,12 @@ async def update_search_index_prompt(
                             if attempt % 6 == 0:  # Print every 30 seconds
                                 print(f"   ⏳ Status: {runtime_status} (waiting for SUBMITTED, attempt {attempt + 1}/{max_attempts_phase1})...")
                     
+                    # Emit keepalive for long waits
+                    now = datetime.utcnow()
+                    if (now - last_keepalive).total_seconds() >= keepalive_interval_seconds:
+                        print(f"   🟢 Keepalive: still waiting for SUBMITTED (attempt {attempt + 1}/{max_attempts_phase1})")
+                        last_keepalive = now
+                    
                     await asyncio.sleep(5)
                 
                 if not submitted_reached:
@@ -1603,11 +1640,14 @@ async def update_search_index_prompt(
                 else:
                     print("\n   Phase 2: Waiting for status to change to Ready/Active...")
                     print("   (This may take several minutes depending on index size)")
-                    print("   ⏳ Will wait indefinitely until READY status + indexRefreshedOn timestamp...")
+                    print("   ⏳ Will wait indefinitely until READY status + indexRefreshedOn timestamp (heartbeat every 3 min)...")
                     ready_reached = False
                     attempt = 0
                     
                     while not ready_reached:
+                        if should_abort():
+                            status_check_success = False
+                            break
                         req = urllib.request.Request(api_url)
                         req.add_header('Authorization', f'Bearer {access_token}')
                         req.add_header('Content-Type', 'application/json')
@@ -1751,6 +1791,12 @@ async def update_search_index_prompt(
                                     print(f"   ⏳ Status: {runtime_status} (waiting for Ready + timestamp, attempt {attempt + 1})...")
                         
                         attempt += 1
+                        # Emit keepalive for long waits
+                        now = datetime.utcnow()
+                        if (now - last_keepalive).total_seconds() >= keepalive_interval_seconds:
+                            print(f"   🟢 Keepalive: still waiting for READY (attempt {attempt + 1}) status={runtime_status}")
+                            last_keepalive = now
+                        
                         await asyncio.sleep(5)
                     
                     # FINAL VALIDATION: Verify the prompt was actually saved (only if not skipping wait)

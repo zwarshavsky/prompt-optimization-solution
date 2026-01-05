@@ -1910,6 +1910,7 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                         instance_url=instance_url,
                         search_index_id=search_index_id,
                         new_prompt=previous_cycle_prompt,
+                        run_id=run_id,
                         capture_network=False,
                         take_screenshots=take_screenshots,
                         headless=headless_mode,
