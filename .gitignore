@@ -74,4 +74,7 @@ inputs/*.txt
 # Documentation (optional - keep if you want)
 # docs/
 
+# Temporary testing and development files
+temp/
+
 

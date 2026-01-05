@@ -27,7 +27,8 @@ async def update_search_index_prompt(
     capture_network: bool = False,
     take_screenshots: bool = False,
     headless: bool = False,
-    slow_mo: int = 0
+    slow_mo: int = 0,
+    skip_wait: bool = False
 ):
     """
     Update the LLM parser prompt for a Search Index.
@@ -1593,193 +1594,201 @@ async def update_search_index_prompt(
                     status_check_success = False
                 
                 # Phase 2: Wait for Ready/Active status (confirms build is complete)
-                print("\n   Phase 2: Waiting for status to change to Ready/Active...")
-                print("   (This may take several minutes depending on index size)")
-                print("   ⏳ Will wait indefinitely until READY status + indexRefreshedOn timestamp...")
-                ready_reached = False
-                attempt = 0
-                
-                while not ready_reached:
-                    req = urllib.request.Request(api_url)
-                    req.add_header('Authorization', f'Bearer {access_token}')
-                    req.add_header('Content-Type', 'application/json')
+                if skip_wait:
+                    print("\n   ⏭️  Skipping Phase 2 wait (skip_wait=True)")
+                    print("   ⚠️  Note: Index rebuild may still be in progress")
+                    print("   ✅ Assuming success for memory testing purposes")
+                    ready_reached = True
+                    status_check_success = True
+                else:
+                    print("\n   Phase 2: Waiting for status to change to Ready/Active...")
+                    print("   (This may take several minutes depending on index size)")
+                    print("   ⏳ Will wait indefinitely until READY status + indexRefreshedOn timestamp...")
+                    ready_reached = False
+                    attempt = 0
                     
-                    with urllib.request.urlopen(req, timeout=30) as response:
-                        index_data = json.loads(response.read().decode())
-                        runtime_status = index_data.get('runtimeStatus', 'Unknown')
-                        build_status = index_data.get('buildStatus', 'Unknown')
+                    while not ready_reached:
+                        req = urllib.request.Request(api_url)
+                        req.add_header('Authorization', f'Bearer {access_token}')
+                        req.add_header('Content-Type', 'application/json')
                         
-                        # Check status (case-insensitive)
-                        runtime_status_upper = runtime_status.upper() if runtime_status else ''
-                        if runtime_status_upper in ['ACTIVE', 'READY']:
-                            # Check if indexRefreshedOn timestamp exists (required for success)
-                            index_refreshed_on = index_data.get('indexRefreshedOn')
-                            if index_refreshed_on:
-                                print(f"\n   ✅ Status: {runtime_status}")
-                                print(f"   ✅ Index Refreshed On: {index_refreshed_on}")
-                                print(f"   ✅ Index build is complete and ready to use!")
-                                if build_status and build_status != 'N/A':
-                                    print(f"   Build Status: {build_status}")
-                                ready_reached = True
-                                status_check_success = True
-                                break
-                            else:
-                                # READY but no timestamp - rebuild may not have started yet, keep waiting
-                                if attempt % 12 == 0:  # Print every 60 seconds
-                                    print(f"   ⏳ Status: {runtime_status} but indexRefreshedOn is null (waiting for rebuild to start, attempt {attempt + 1})...")
-                        elif runtime_status == 'Failed' or 'FAILED' in runtime_status.upper():
-                            print(f"\n   ❌ Status: {runtime_status}")
-                            print(f"   ❌ Index build failed!")
-                            if 'errorMessage' in index_data and index_data.get('errorMessage'):
-                                print(f"   Error Message: {index_data.get('errorMessage')}")
+                        with urllib.request.urlopen(req, timeout=30) as response:
+                            index_data = json.loads(response.read().decode())
+                            runtime_status = index_data.get('runtimeStatus', 'Unknown')
+                            build_status = index_data.get('buildStatus', 'Unknown')
                             
-                            # Trigger rebuild if browser is still open and we haven't exceeded max attempts
-                            if not browser_closed and rebuild_attempts < max_rebuild_attempts:
-                                rebuild_attempts += 1
-                                print(f"\n   🔄 Attempting to trigger rebuild (attempt {rebuild_attempts}/{max_rebuild_attempts})...")
-                                try:
-                                    # Navigate to detail page if not already there
-                                    detail_url = f"{instance_url}/lightning/r/DataSemanticSearch/{search_index_id}/view"
-                                    if page.url != detail_url:
-                                        await page.goto(detail_url, wait_until='domcontentloaded', timeout=30000)
-                                        await asyncio.sleep(2)
-                                    
-                                    # Find and click Rebuild button (between Delete and Edit)
-                                    rebuild_clicked = False
+                            # Check status (case-insensitive)
+                            runtime_status_upper = runtime_status.upper() if runtime_status else ''
+                            if runtime_status_upper in ['ACTIVE', 'READY']:
+                                # Check if indexRefreshedOn timestamp exists (required for success)
+                                index_refreshed_on = index_data.get('indexRefreshedOn')
+                                if index_refreshed_on:
+                                    print(f"\n   ✅ Status: {runtime_status}")
+                                    print(f"   ✅ Index Refreshed On: {index_refreshed_on}")
+                                    print(f"   ✅ Index build is complete and ready to use!")
+                                    if build_status and build_status != 'N/A':
+                                        print(f"   Build Status: {build_status}")
+                                    ready_reached = True
+                                    status_check_success = True
+                                    break
+                                else:
+                                    # READY but no timestamp - rebuild may not have started yet, keep waiting
+                                    if attempt % 12 == 0:  # Print every 60 seconds
+                                        print(f"   ⏳ Status: {runtime_status} but indexRefreshedOn is null (waiting for rebuild to start, attempt {attempt + 1})...")
+                            elif runtime_status == 'Failed' or 'FAILED' in runtime_status.upper():
+                                print(f"\n   ❌ Status: {runtime_status}")
+                                print(f"   ❌ Index build failed!")
+                                if 'errorMessage' in index_data and index_data.get('errorMessage'):
+                                    print(f"   Error Message: {index_data.get('errorMessage')}")
+                                
+                                # Trigger rebuild if browser is still open and we haven't exceeded max attempts
+                                if not browser_closed and rebuild_attempts < max_rebuild_attempts:
+                                    rebuild_attempts += 1
+                                    print(f"\n   🔄 Attempting to trigger rebuild (attempt {rebuild_attempts}/{max_rebuild_attempts})...")
                                     try:
-                                        rebuild_btn = page.locator("button:has-text('Rebuild')").first
-                                        if await rebuild_btn.is_visible(timeout=5000):
-                                            await rebuild_btn.click()
-                                            print(f"   ✅ Clicked Rebuild button!")
-                                            await take_screenshot("12_after_rebuild_click")
+                                        # Navigate to detail page if not already there
+                                        detail_url = f"{instance_url}/lightning/r/DataSemanticSearch/{search_index_id}/view"
+                                        if page.url != detail_url:
+                                            await page.goto(detail_url, wait_until='domcontentloaded', timeout=30000)
                                             await asyncio.sleep(2)
-                                            
-                                            # Wait for confirmation modal to appear
-                                            print(f"   ⏳ Waiting for rebuild confirmation modal...")
-                                            try:
-                                                # Look for the confirmation modal's Rebuild button
-                                                # The modal has a "Rebuild" button (not just the page button)
-                                                modal_rebuild_btn = page.locator("button:has-text('Rebuild')").filter(has_text="Rebuild").last
-                                                # Alternative: look for button in modal dialog
-                                                # Try multiple selectors for the modal confirm button
-                                                modal_confirm_clicked = False
-                                                
-                                                # Wait for modal to appear (up to 5 seconds)
+                                        
+                                        # Find and click Rebuild button (between Delete and Edit)
+                                        rebuild_clicked = False
+                                        try:
+                                            rebuild_btn = page.locator("button:has-text('Rebuild')").first
+                                            if await rebuild_btn.is_visible(timeout=5000):
+                                                await rebuild_btn.click()
+                                                print(f"   ✅ Clicked Rebuild button!")
+                                                await take_screenshot("12_after_rebuild_click")
                                                 await asyncio.sleep(2)
                                                 
-                                                # Try to find the modal's Rebuild button
-                                                # The modal typically has a button with text "Rebuild" that's different from the page button
-                                                modal_buttons = page.locator("button:has-text('Rebuild')")
-                                                button_count = await modal_buttons.count()
-                                                
-                                                if button_count > 1:
-                                                    # Click the last one (which should be the modal button)
-                                                    await modal_buttons.last.click()
-                                                    modal_confirm_clicked = True
-                                                    print(f"   ✅ Clicked Rebuild confirmation in modal!")
-                                                else:
-                                                    # Try alternative: look for button in a modal/dialog
-                                                    modal_dialog = page.locator("div[role='dialog'], lightning-modal, c-modal")
-                                                    if await modal_dialog.count() > 0:
-                                                        modal_rebuild = modal_dialog.locator("button:has-text('Rebuild')").last
-                                                        if await modal_rebuild.is_visible(timeout=3000):
-                                                            await modal_rebuild.click()
-                                                            modal_confirm_clicked = True
-                                                            print(f"   ✅ Clicked Rebuild confirmation in modal!")
-                                                
-                                                if not modal_confirm_clicked:
-                                                    print(f"   ⚠️  Could not find confirmation modal button, trying direct click...")
-                                                    # Fallback: try clicking any visible Rebuild button again
-                                                    all_rebuild_buttons = page.locator("button:has-text('Rebuild')")
-                                                    for i in range(await all_rebuild_buttons.count()):
-                                                        btn = all_rebuild_buttons.nth(i)
-                                                        if await btn.is_visible(timeout=1000):
-                                                            await btn.click()
-                                                            modal_confirm_clicked = True
-                                                            print(f"   ✅ Clicked Rebuild button (fallback method)!")
-                                                            break
-                                                
-                                                if modal_confirm_clicked:
-                                                    rebuild_clicked = True
-                                                    await take_screenshot("12_after_modal_confirm")
-                                                    await asyncio.sleep(2)
-                                                else:
-                                                    print(f"   ⚠️  Could not confirm rebuild in modal")
+                                                # Wait for confirmation modal to appear
+                                                print(f"   ⏳ Waiting for rebuild confirmation modal...")
+                                                try:
+                                                    # Look for the confirmation modal's Rebuild button
+                                                    # The modal has a "Rebuild" button (not just the page button)
+                                                    modal_rebuild_btn = page.locator("button:has-text('Rebuild')").filter(has_text="Rebuild").last
+                                                    # Alternative: look for button in modal dialog
+                                                    # Try multiple selectors for the modal confirm button
+                                                    modal_confirm_clicked = False
                                                     
-                                            except Exception as e:
-                                                print(f"   ⚠️  Error handling confirmation modal: {e}")
-                                                await take_screenshot("12_modal_error")
-                                            
-                                            if rebuild_clicked:
-                                                # Reset polling - start over
-                                                print(f"   ⏳ Restarting status polling after rebuild...")
-                                                print(f"   ⏳ Waiting 60 seconds for rebuild to be submitted and status to update...")
-                                                ready_reached = False  # Reset to continue polling
-                                                await asyncio.sleep(60)  # Wait 60 seconds for status to change
-                                                continue  # Continue the loop to check status again
+                                                    # Wait for modal to appear (up to 5 seconds)
+                                                    await asyncio.sleep(2)
+                                                    
+                                                    # Try to find the modal's Rebuild button
+                                                    # The modal typically has a button with text "Rebuild" that's different from the page button
+                                                    modal_buttons = page.locator("button:has-text('Rebuild')")
+                                                    button_count = await modal_buttons.count()
+                                                    
+                                                    if button_count > 1:
+                                                        # Click the last one (which should be the modal button)
+                                                        await modal_buttons.last.click()
+                                                        modal_confirm_clicked = True
+                                                        print(f"   ✅ Clicked Rebuild confirmation in modal!")
+                                                    else:
+                                                        # Try alternative: look for button in a modal/dialog
+                                                        modal_dialog = page.locator("div[role='dialog'], lightning-modal, c-modal")
+                                                        if await modal_dialog.count() > 0:
+                                                            modal_rebuild = modal_dialog.locator("button:has-text('Rebuild')").last
+                                                            if await modal_rebuild.is_visible(timeout=3000):
+                                                                await modal_rebuild.click()
+                                                                modal_confirm_clicked = True
+                                                                print(f"   ✅ Clicked Rebuild confirmation in modal!")
+                                                    
+                                                    if not modal_confirm_clicked:
+                                                        print(f"   ⚠️  Could not find confirmation modal button, trying direct click...")
+                                                        # Fallback: try clicking any visible Rebuild button again
+                                                        all_rebuild_buttons = page.locator("button:has-text('Rebuild')")
+                                                        for i in range(await all_rebuild_buttons.count()):
+                                                            btn = all_rebuild_buttons.nth(i)
+                                                            if await btn.is_visible(timeout=1000):
+                                                                await btn.click()
+                                                                modal_confirm_clicked = True
+                                                                print(f"   ✅ Clicked Rebuild button (fallback method)!")
+                                                                break
+                                                    
+                                                    if modal_confirm_clicked:
+                                                        rebuild_clicked = True
+                                                        await take_screenshot("12_after_modal_confirm")
+                                                        await asyncio.sleep(2)
+                                                    else:
+                                                        print(f"   ⚠️  Could not confirm rebuild in modal")
+                                                        
+                                                except Exception as e:
+                                                    print(f"   ⚠️  Error handling confirmation modal: {e}")
+                                                    await take_screenshot("12_modal_error")
+                                                
+                                                if rebuild_clicked:
+                                                    # Reset polling - start over
+                                                    print(f"   ⏳ Restarting status polling after rebuild...")
+                                                    print(f"   ⏳ Waiting 60 seconds for rebuild to be submitted and status to update...")
+                                                    ready_reached = False  # Reset to continue polling
+                                                    await asyncio.sleep(60)  # Wait 60 seconds for status to change
+                                                    continue  # Continue the loop to check status again
+                                        except Exception as e:
+                                            print(f"   ⚠️  Could not click Rebuild: {e}")
+                                        
+                                        if not rebuild_clicked:
+                                            print(f"   ⚠️  Rebuild button not found or not clickable")
+                                            status_check_success = False
+                                            break
                                     except Exception as e:
-                                        print(f"   ⚠️  Could not click Rebuild: {e}")
-                                    
-                                    if not rebuild_clicked:
-                                        print(f"   ⚠️  Rebuild button not found or not clickable")
+                                        print(f"   ⚠️  Error during rebuild attempt: {e}")
                                         status_check_success = False
                                         break
-                                except Exception as e:
-                                    print(f"   ⚠️  Error during rebuild attempt: {e}")
+                                elif rebuild_attempts >= max_rebuild_attempts:
+                                    print(f"\n   ⚠️  Maximum rebuild attempts ({max_rebuild_attempts}) reached")
+                                    print(f"   Please manually investigate and rebuild if needed")
                                     status_check_success = False
                                     break
-                            elif rebuild_attempts >= max_rebuild_attempts:
-                                print(f"\n   ⚠️  Maximum rebuild attempts ({max_rebuild_attempts}) reached")
-                                print(f"   Please manually investigate and rebuild if needed")
-                                status_check_success = False
-                                break
-                            else:
-                                print(f"   ⚠️  Browser is closed - cannot trigger rebuild automatically")
-                                print(f"   Please manually click Rebuild on the index detail page")
-                                status_check_success = False
-                                break
-                        else:
-                            if attempt % 12 == 0:  # Print every 60 seconds
-                                print(f"   ⏳ Status: {runtime_status} (waiting for Ready + timestamp, attempt {attempt + 1})...")
-                    
-                    attempt += 1
-                    await asyncio.sleep(5)
-                else:
-                    # FINAL VALIDATION: Verify the prompt was actually saved
-                    print(f"\n📊 Final Status: {runtime_status} - Index is ready!")
-                    print("\n🔍 FINAL VALIDATION: Checking if prompt was actually saved...")
-                    
-                    # Get the saved prompt from API
-                    req_final = urllib.request.Request(api_url)
-                    req_final.add_header('Authorization', f'Bearer {access_token}')
-                    req_final.add_header('Content-Type', 'application/json')
-                    
-                    with urllib.request.urlopen(req_final, timeout=30) as response_final:
-                        index_data_final = json.loads(response_final.read().decode())
-                        parsing_configs = index_data_final.get('parsingConfigurations', [])
-                        prompt_saved = False
-                        
-                        for config in parsing_configs:
-                            user_values = config.get('config', {}).get('userValues', [])
-                            for uv in user_values:
-                                if uv.get('id') == 'prompt':
-                                    saved_prompt = uv.get('value', '')
-                                    # Check if our prompt text is in the saved prompt
-                                    if new_prompt[:100] in saved_prompt or new_prompt in saved_prompt:
-                                        print(f"   ✅ VALIDATION PASSED: Prompt was saved correctly!")
-                                        print(f"   ✅ Saved prompt contains our text (first 100 chars match)")
-                                        prompt_saved = True
-                                        status_check_success = True
-                                    else:
-                                        print(f"   ❌ VALIDATION FAILED: Prompt was NOT saved!")
-                                        print(f"   Expected (first 100 chars): {new_prompt[:100]}")
-                                        print(f"   Actual (first 100 chars): {saved_prompt[:100]}")
-                                        status_check_success = False
+                                else:
+                                    print(f"   ⚠️  Browser is closed - cannot trigger rebuild automatically")
+                                    print(f"   Please manually click Rebuild on the index detail page")
+                                    status_check_success = False
                                     break
+                            else:
+                                if attempt % 12 == 0:  # Print every 60 seconds
+                                    print(f"   ⏳ Status: {runtime_status} (waiting for Ready + timestamp, attempt {attempt + 1})...")
                         
-                        if not prompt_saved:
-                            print(f"   ❌ VALIDATION FAILED: Could not find prompt in saved configuration")
-                            status_check_success = False
+                        attempt += 1
+                        await asyncio.sleep(5)
+                    
+                    # FINAL VALIDATION: Verify the prompt was actually saved (only if not skipping wait)
+                    if not skip_wait:
+                        print(f"\n📊 Final Status: {runtime_status} - Index is ready!")
+                        print("\n🔍 FINAL VALIDATION: Checking if prompt was actually saved...")
+                        
+                        # Get the saved prompt from API
+                        req_final = urllib.request.Request(api_url)
+                        req_final.add_header('Authorization', f'Bearer {access_token}')
+                        req_final.add_header('Content-Type', 'application/json')
+                        
+                        with urllib.request.urlopen(req_final, timeout=30) as response_final:
+                            index_data_final = json.loads(response_final.read().decode())
+                            parsing_configs = index_data_final.get('parsingConfigurations', [])
+                            prompt_saved = False
+                            
+                            for config in parsing_configs:
+                                user_values = config.get('config', {}).get('userValues', [])
+                                for uv in user_values:
+                                    if uv.get('id') == 'prompt':
+                                        saved_prompt = uv.get('value', '')
+                                        # Check if our prompt text is in the saved prompt
+                                        if new_prompt[:100] in saved_prompt or new_prompt in saved_prompt:
+                                            print(f"   ✅ VALIDATION PASSED: Prompt was saved correctly!")
+                                            print(f"   ✅ Saved prompt contains our text (first 100 chars match)")
+                                            prompt_saved = True
+                                            status_check_success = True
+                                        else:
+                                            print(f"   ❌ VALIDATION FAILED: Prompt was NOT saved!")
+                                            print(f"   Expected (first 100 chars): {new_prompt[:100]}")
+                                            print(f"   Actual (first 100 chars): {saved_prompt[:100]}")
+                                            status_check_success = False
+                                        break
+                            
+                            if not prompt_saved:
+                                print(f"   ❌ VALIDATION FAILED: Could not find prompt in saved configuration")
+                                status_check_success = False
                     
             except Exception as e:
                 print(f"   ⚠️  Could not check status via API: {e}")

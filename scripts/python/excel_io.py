@@ -338,18 +338,18 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
     excel_path.parent.mkdir(parents=True, exist_ok=True)
     
     excel_file_exists = excel_path.exists()
-    is_run_file = "run_" in str(excel_file) and excel_file.endswith('.xlsx')
     
     try:
-        # For run-specific files, ALWAYS use append mode to preserve existing cycles
-        # Only use 'w' mode for truly new files that don't exist anywhere
-        if excel_file_exists or is_run_file:
-            # File exists on disk OR this is a run file (might exist in DB but not on disk)
-            # Use append mode to preserve existing sheets
+        # CRITICAL FIX: pd.ExcelWriter mode='a' REQUIRES the file to exist
+        # Only use append mode if file actually exists on disk
+        # Use write mode to create new files (even for run files)
+        if excel_file_exists:
+            # File exists - use append mode to preserve existing sheets
             with pd.ExcelWriter(excel_file, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
                 final_df.to_excel(writer, sheet_name=f"analysis_{refinement_stage}_cycle{cycle_number}_{Path(excel_file).stem}", index=False, header=False)
         else:
-            # Truly new file - safe to use 'w' mode
+            # File doesn't exist - use write mode to create it
+            # This handles both new run files and files that were in DB but not on disk
             with pd.ExcelWriter(excel_file, engine='openpyxl', mode='w') as writer:
                 final_df.to_excel(writer, sheet_name=f"analysis_{refinement_stage}_cycle{cycle_number}_{Path(excel_file).stem}", index=False, header=False)
     except Exception as e:
