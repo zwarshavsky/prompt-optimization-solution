@@ -2472,6 +2472,9 @@ elif page == "Jobs":
                     3: 'Analyzing Results with Gemini'
                 }
                 
+                # Get job status early (needed for status text logic)
+                job_status = run.get('status', 'unknown')
+                
                 # Build detailed status text
                 if job_status == 'running' and progress.get('status') == 'starting':
                     status_text = "Initializing workflow..."
