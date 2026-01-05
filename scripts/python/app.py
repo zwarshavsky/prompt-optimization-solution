@@ -382,9 +382,12 @@ def load_runs() -> List[Dict]:
                     deserialize_datetime(run)
                     runs.append(run)
                 
+                print(f"[APP] Loaded {len(runs)} job(s) from database", flush=True)
                 return runs
         except Exception as e:
-            print(f"Error loading runs from database: {e}")
+            print(f"[APP] Error loading runs from database: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             # Fall through to JSON fallback
         finally:
             conn.close()
