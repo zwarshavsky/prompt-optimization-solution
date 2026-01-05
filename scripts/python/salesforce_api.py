@@ -297,7 +297,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         error_messages = []
                         for e in errors:
                             if isinstance(e, dict):
-                                error_messages.append(e.get('message', str(e)))
+                                error_messages.append(e.get('message') or str(e))
                             else:
                                 error_messages.append(str(e))
                         error_msg = ', '.join(error_messages) if error_messages else 'Unknown error'
@@ -356,6 +356,8 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         log_print(f"      ⏳ ValidationException retry {attempt + 1}/{effective_max_retries} (waiting {wait_time}s)...")
                         time.sleep(wait_time)
                         continue
+                    if is_validation_exception and attempt >= effective_max_retries:
+                        break  # try next model
                     
                     return (f"Error: {error_msg[:200]}", current_model)
                 else:  # response.status_code != 200
@@ -363,7 +365,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                     error_messages = []
                     for e in errors:
                         if isinstance(e, dict):
-                            error_messages.append(e.get('message', str(e)))
+                            error_messages.append(e.get('message') or str(e))
                         else:
                             error_messages.append(str(e))
                     error_msg = ', '.join(error_messages) if error_messages else 'Unknown error'
@@ -419,6 +421,8 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         log_print(f"      ⏳ ValidationException retry {attempt + 1}/{effective_max_retries} (waiting {wait_time}s)...")
                         time.sleep(wait_time)
                         continue
+                    if is_validation_exception and attempt >= effective_max_retries:
+                        break  # try next model
                     
                     return (f"API Error: {response.status_code}, {error_msg[:200]}", current_model)
             except requests.exceptions.RequestException as e:
