@@ -2042,6 +2042,24 @@ if page == "Create New Run":
                 if custom_instructions and custom_instructions.strip():
                     config_section['customInstructions'] = custom_instructions.strip()
                 
+                # VALIDATION: PDFs are REQUIRED for Gemini analysis (Step 3)
+                uploaded_pdf_files = st.session_state.get('uploaded_pdf_files', [])
+                if not uploaded_pdf_files or len(uploaded_pdf_files) == 0:
+                    st.error("❌ **ERROR: PDF files are REQUIRED!**")
+                    st.error("The workflow requires PDF files for Gemini analysis in Step 3. Please upload at least one PDF file before creating a job.")
+                    st.stop()
+                
+                # Validate that PDF files actually exist
+                missing_pdfs = []
+                for pdf_path in uploaded_pdf_files:
+                    if not os.path.exists(pdf_path):
+                        missing_pdfs.append(pdf_path)
+                
+                if missing_pdfs:
+                    st.error(f"❌ **ERROR: PDF files not found:** {', '.join(missing_pdfs)}")
+                    st.error("Please re-upload the PDF files.")
+                    st.stop()
+                
                 yaml_config = {
                     "configuration": config_section,
                     "questions": questions_clean
@@ -2062,17 +2080,25 @@ if page == "Create New Run":
                 st.session_state.current_run = run_data
                 st.session_state.show_create_modal = False
                 
-                # Save PDFs to database if they were uploaded
-                if st.session_state.get('uploaded_pdf_files'):
-                    pdf_files = st.session_state.uploaded_pdf_files
-                    if save_pdfs_to_db(run_id, pdf_files):
-                        print(f"[APP] Saved {len(pdf_files)} PDF file(s) to database for run {run_id}", flush=True)
-                    else:
-                        print(f"[APP] Warning: Failed to save PDF files to database for run {run_id}", flush=True)
+                # Save run to database FIRST (so run_id exists)
+                save_runs(st.session_state.runs)  # Persist to database/file
+                
+                # Save PDFs to database (REQUIRED - will fail if this doesn't work)
+                pdf_files = uploaded_pdf_files
+                if not save_pdfs_to_db(run_id, pdf_files):
+                    st.error(f"❌ **CRITICAL ERROR: Failed to save PDF files to database for run {run_id}**")
+                    st.error("The job cannot proceed without PDFs. Please try again.")
+                    # Mark job as failed
+                    run_data['status'] = 'failed'
+                    run_data['error'] = 'Failed to save PDF files to database'
+                    save_runs(st.session_state.runs)
+                    st.stop()
+                
+                print(f"[APP] Saved {len(pdf_files)} PDF file(s) to database for run {run_id}", flush=True)
                 
                 # Mark job as queued (worker will pick it up)
                 run_data['status'] = 'queued'
-                save_runs(st.session_state.runs)  # Persist to database/file
+                save_runs(st.session_state.runs)  # Update status in database
                 
                 print(f"[APP] Job queued: {run_id}", flush=True)
                 st.success(f"✅ Workflow queued! Run ID: `{run_id}`")
