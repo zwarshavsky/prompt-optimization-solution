@@ -332,7 +332,12 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
     # CRITICAL FIX: Always use append mode ('a') if file exists, even if just loaded from DB
     # Never use 'w' mode for run-specific files as it would overwrite existing cycles
     from openpyxl import load_workbook
-    excel_file_exists = Path(excel_file).exists()
+    
+    # CRITICAL: Ensure directory exists before writing
+    excel_path = Path(excel_file)
+    excel_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    excel_file_exists = excel_path.exists()
     is_run_file = "run_" in str(excel_file) and excel_file.endswith('.xlsx')
     
     try:
@@ -348,8 +353,10 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
             with pd.ExcelWriter(excel_file, engine='openpyxl', mode='w') as writer:
                 final_df.to_excel(writer, sheet_name=f"analysis_{refinement_stage}_cycle{cycle_number}_{Path(excel_file).stem}", index=False, header=False)
     except Exception as e:
-        log_print(f"❌ Error writing to Excel: {e}")
-        sys.exit(1)
+        error_msg = f"CRITICAL: Cannot write Excel file to {excel_file}: {e}"
+        log_print(f"❌ {error_msg}")
+        # Raise exception instead of sys.exit so worker can catch and mark job as failed
+        raise RuntimeError(error_msg) from e
 
     # Ensure Running_Score sheet exists (create if new file or if missing)
     # Match old working structure exactly
