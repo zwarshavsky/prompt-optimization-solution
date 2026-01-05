@@ -510,6 +510,8 @@ def save_runs(runs: List[Dict]) -> None:
                         heartbeat_at = heartbeat_at.isoformat()
                     
                     # Use INSERT ... ON CONFLICT to update existing runs
+                    # IMPORTANT: Don't overwrite status if job is actively running (has recent heartbeat)
+                    # This prevents stale session_state data from overwriting worker updates
                     cur.execute("""
                         INSERT INTO runs (
                             run_id, status, config, progress, output_lines,
@@ -520,7 +522,17 @@ def save_runs(runs: List[Dict]) -> None:
                             %s::jsonb, %s, %s, %s, %s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP
                         )
                         ON CONFLICT (run_id) DO UPDATE SET
-                            status = EXCLUDED.status,
+                            -- Prevent overwriting 'running'/'interrupted'/'completed' status with 'queued' (stale data issue)
+                            -- But allow legitimate transitions: running→failed, running→completed, etc.
+                            status = CASE 
+                                WHEN runs.heartbeat_at > NOW() - INTERVAL '5 minutes' 
+                                    AND runs.status IN ('running', 'interrupted')
+                                    AND EXCLUDED.status = 'queued'
+                                THEN runs.status  -- Prevent stale 'queued' from overwriting active job
+                                WHEN runs.status = 'completed' AND EXCLUDED.status = 'queued'
+                                THEN runs.status  -- Prevent stale 'queued' from overwriting completed job
+                                ELSE EXCLUDED.status  -- Allow all other status transitions
+                            END,
                             config = EXCLUDED.config,
                             progress = EXCLUDED.progress,
                             output_lines = EXCLUDED.output_lines,
@@ -530,7 +542,7 @@ def save_runs(runs: List[Dict]) -> None:
                             excel_file_path = EXCLUDED.excel_file_path,
                             started_at = EXCLUDED.started_at,
                             completed_at = EXCLUDED.completed_at,
-                            heartbeat_at = EXCLUDED.heartbeat_at,
+                            heartbeat_at = COALESCE(EXCLUDED.heartbeat_at, runs.heartbeat_at),
                             checkpoint_info = EXCLUDED.checkpoint_info,
                             updated_at = CURRENT_TIMESTAMP
                     """, (
@@ -2147,7 +2159,12 @@ elif page == "Jobs":
                 del st.session_state.runs
             st.rerun()
     
-    # Always reload runs from file to get latest updates
+    # CRITICAL: Always reload from database (never use stale session_state)
+    # Clear session_state cache to force fresh load
+    if 'runs' in st.session_state:
+        del st.session_state.runs
+    
+    # Always reload runs from database to get latest updates
     fresh_runs = load_runs()
     
     # Detect and mark dead jobs (jobs with stale heartbeat)
@@ -2157,6 +2174,7 @@ elif page == "Jobs":
         # Reload runs after marking dead jobs
         fresh_runs = load_runs()
     
+    # Update session_state with fresh data
     st.session_state.runs = fresh_runs
     
     # Filter options

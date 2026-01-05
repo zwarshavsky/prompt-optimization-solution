@@ -18,6 +18,7 @@ if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
 from worker_utils import (
+    get_db_connection,
     get_queued_jobs,
     get_interrupted_jobs,
     mark_job_as_running,
@@ -132,9 +133,36 @@ def process_job(run_id: str, resume_info: Optional[Dict[str, Any]] = None) -> bo
     try:
         print(f"[WORKER] Processing job: {run_id}", flush=True)
         
-        # Mark as running
-        if not mark_job_as_running(run_id):
-            print(f"[WORKER] ERROR: Failed to mark job {run_id} as running", flush=True)
+        # Mark as running (with retry and verification)
+        max_retries = 3
+        marked = False
+        for attempt in range(max_retries):
+            if mark_job_as_running(run_id):
+                # Verify it was actually updated
+                conn_check = get_db_connection()
+                if conn_check:
+                    try:
+                        with conn_check.cursor() as cur_check:
+                            cur_check.execute("SELECT status FROM runs WHERE run_id = %s", (run_id,))
+                            row = cur_check.fetchone()
+                            if row and row[0] == 'running':
+                                marked = True
+                                print(f"[WORKER] Verified job {run_id} marked as running", flush=True)
+                                break
+                    except Exception as e:
+                        print(f"[WORKER] Warning: Could not verify status update: {e}", flush=True)
+                    finally:
+                        conn_check.close()
+                else:
+                    # Assume it worked if we can't verify
+                    marked = True
+                    break
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(0.5)  # Brief delay before retry
+        
+        if not marked:
+            print(f"[WORKER] ERROR: Failed to mark job {run_id} as running after {max_retries} attempts", flush=True)
             return False
         
         # Load job config from database

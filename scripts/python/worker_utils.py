@@ -274,17 +274,18 @@ def load_pdfs_from_db(run_id: str, output_dir: Optional[str] = None) -> List[str
 
 
 def update_job_progress(run_id: str, progress: Dict[str, Any], output_line: Optional[str] = None) -> bool:
-    """Update job progress and optionally add output line"""
+    """Update job progress and optionally add output line. Also ensures status is 'running' if job is active."""
     conn = get_db_connection()
     if not conn:
         return False
     
     try:
         with conn.cursor() as cur:
-            # Get current output_lines
-            cur.execute("SELECT output_lines FROM runs WHERE run_id = %s", (run_id,))
+            # Get current output_lines and status
+            cur.execute("SELECT output_lines, status FROM runs WHERE run_id = %s", (run_id,))
             row = cur.fetchone()
             output_lines = row[0] if row and row[0] else []
+            current_status = row[1] if row and len(row) > 1 else 'unknown'
             
             # Add new output line if provided
             if output_line:
@@ -295,14 +296,22 @@ def update_job_progress(run_id: str, progress: Dict[str, Any], output_line: Opti
                 if len(output_lines) > 1000:
                     output_lines = output_lines[-1000:]
             
+            # If job is queued/interrupted but has active progress, mark as running
+            # This ensures status stays synchronized with actual work being done
+            status_to_set = current_status
+            if current_status in ['queued', 'interrupted']:
+                # If we're getting progress updates, the job is actually running
+                status_to_set = 'running'
+            
             cur.execute("""
                 UPDATE runs 
                 SET progress = %s::jsonb,
                     output_lines = %s::jsonb,
+                    status = %s,
                     heartbeat_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE run_id = %s
-            """, (json.dumps(progress), json.dumps(output_lines), run_id))
+            """, (json.dumps(progress), json.dumps(output_lines), status_to_set, run_id))
             conn.commit()
             return cur.rowcount > 0
     except Exception as e:
