@@ -1623,12 +1623,24 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                                 if checkpoint:
                                     log_print(f"  ✅ Found checkpoint in database: Cycle {checkpoint.get('cycle')}, Step {checkpoint.get('step')}")
                                     
+                                    # CRITICAL: Load Excel file from database if it exists but not on disk
+                                    resolved_excel_file = excel_file_path or excel_file
+                                    if excel_file_path and not Path(excel_file_path).exists():
+                                        try:
+                                            from app import load_excel_from_db
+                                            loaded_path = load_excel_from_db(run_id)
+                                            if loaded_path:
+                                                resolved_excel_file = loaded_path
+                                                log_print(f"  ✅ Loaded Excel file from database: {Path(loaded_path).name}")
+                                        except Exception as e:
+                                            log_print(f"  ⚠️  Could not load Excel from DB: {e}")
+                                    
                                     # Build state-like structure from checkpoint_info
                                     state = {
                                         'cycle_number': checkpoint.get('cycle', 1),
                                         'last_completed_step': checkpoint.get('step', 0) - 1 if checkpoint.get('step', 0) > 0 else 0,
                                         'run_id': run_id,
-                                        'excel_file': excel_file_path or excel_file,
+                                        'excel_file': resolved_excel_file,
                                         'yaml_config_snapshot': config_data if config_data else yaml_config,
                                         '_from_database_checkpoint': True  # Flag to skip validation
                                     }
@@ -2004,6 +2016,10 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                     pass
             
             try:
+                # CRITICAL: Pass run_id in config_dict so excel_io.py can load from DB if needed
+                yaml_config_with_run_id = yaml_config.copy()
+                yaml_config_with_run_id['_run_id'] = run_id
+                
                 new_sheet_name = create_analysis_sheet_with_prompts(
                     excel_file=excel_file,
                     questions_list=questions_list,
@@ -2012,7 +2028,7 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                     models_list=models_list,
                     refinement_stage=refinement_stage,
                     cycle_number=cycle_number,
-                    config_dict=yaml_config
+                    config_dict=yaml_config_with_run_id
                 )
                 
                 log_print(f"\n✅ Step 2 Complete: Created sheet '{new_sheet_name}' with prompt responses")

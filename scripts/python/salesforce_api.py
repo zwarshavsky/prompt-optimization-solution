@@ -194,7 +194,10 @@ def clean_html_response(text):
 
 
 def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries=3, model_used=None, models_list=None):
-    """Invoke prompt template via REST API with retry logic and logging."""
+    """Invoke prompt template via REST API with retry logic and logging.
+    
+    Note: ValidationException errors automatically get 5 retries instead of the default max_retries.
+    """
     if models_list and len(models_list) > 0:
         models_to_try = models_list
     elif model_used:
@@ -211,16 +214,21 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
         payload = {"inputs": [{"Input:Question": question}]}
         
-        for attempt in range(max_retries):
+        # Start with default retries, but will increase to 5 if ValidationException is detected
+        effective_max_retries = max_retries
+        attempt = 0
+        
+        while attempt < effective_max_retries:
             if attempt > 0:
-                log_print(f"      ⏳ Retry attempt {attempt + 1}/{max_retries}...")
+                log_print(f"      ⏳ Retry attempt {attempt + 1}/{effective_max_retries}...")
+            attempt += 1
             try:
                 response = session.post(url, headers=headers, json=payload, timeout=60)
                 try:
                     result = response.json()
                 except:
                     response_text = response.text
-                    if attempt < max_retries - 1:
+                    if attempt < effective_max_retries - 1:
                         time.sleep(0.2 * (attempt + 1))
                         continue
                     return (f"API Error: {response.status_code}, JSON parse failed, response: '{response_text[:200]}', url='{url}'", current_model)
@@ -239,33 +247,50 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                             else:
                                 error_messages.append(str(e))
                         error_msg = ', '.join(error_messages) if error_messages else 'Unknown error'
-                        error_msg_lower = error_msg.lower()
-                        is_provider_rate_limit = (
-                            'provider rate limit' in error_msg_lower or 
-                            ('provider' in error_msg_lower and 'rate limit' in error_msg_lower) or
-                            ('remaining=0' in error_msg and 'limit=' in error_msg and 'errors;minute' not in error_msg)
-                        )
-                        is_org_rate_limit = 'rate limit' in error_msg_lower and not is_provider_rate_limit
-                        if is_provider_rate_limit:
-                            if attempt < max_retries - 1:
-                                wait_time = 1.0 * (2 ** attempt)
-                                time.sleep(wait_time)
-                                continue
-                            elif model_idx < len(models_to_try) - 1:
-                                break
-                            else:
-                                return (f"Error: Provider rate limit on all models - {error_msg[:200]}", current_model)
-                        if is_org_rate_limit and attempt < max_retries - 1:
-                            reset_match = re.search(r'reset=(\\d+)', error_msg)
-                            if reset_match:
-                                wait_time = int(reset_match.group(1)) + 1
-                            else:
-                                wait_time = 1.0 * (2 ** attempt)
+                    else:
+                        error_msg = 'Unknown error - isSuccess was False'
+                    
+                    error_msg_lower = error_msg.lower()
+                    
+                    # Check for ValidationException - use 5 retries for this specific error
+                    is_validation_exception = 'validationexception' in error_msg_lower or 'validation exception' in error_msg_lower
+                    if is_validation_exception and effective_max_retries < 5:
+                        effective_max_retries = 5
+                        log_print(f"      🔄 ValidationException detected - increasing retries to 5")
+                    
+                    is_provider_rate_limit = (
+                        'provider rate limit' in error_msg_lower or 
+                        ('provider' in error_msg_lower and 'rate limit' in error_msg_lower) or
+                        ('remaining=0' in error_msg and 'limit=' in error_msg and 'errors;minute' not in error_msg)
+                    )
+                    is_org_rate_limit = 'rate limit' in error_msg_lower and not is_provider_rate_limit
+                    if is_provider_rate_limit:
+                        if attempt < effective_max_retries - 1:
+                            wait_time = 1.0 * (2 ** attempt)
                             time.sleep(wait_time)
                             continue
-                        return (f"Error: {error_msg[:200]}", current_model)
-                    return (f"Error: Unknown error - isSuccess was False", current_model)
-                else:
+                        elif model_idx < len(models_to_try) - 1:
+                            break
+                        else:
+                            return (f"Error: Provider rate limit on all models - {error_msg[:200]}", current_model)
+                    if is_org_rate_limit and attempt < effective_max_retries - 1:
+                        reset_match = re.search(r'reset=(\\d+)', error_msg)
+                        if reset_match:
+                            wait_time = int(reset_match.group(1)) + 1
+                        else:
+                            wait_time = 1.0 * (2 ** attempt)
+                        time.sleep(wait_time)
+                        continue
+                    
+                    # For ValidationException, retry with exponential backoff
+                    if is_validation_exception and attempt < effective_max_retries - 1:
+                        wait_time = 1.0 * (2 ** attempt)  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                        log_print(f"      ⏳ ValidationException retry {attempt + 1}/{effective_max_retries} (waiting {wait_time}s)...")
+                        time.sleep(wait_time)
+                        continue
+                    
+                    return (f"Error: {error_msg[:200]}", current_model)
+                else:  # response.status_code != 200
                     errors = result[0].get('errors', []) if result and len(result) > 0 else []
                     error_messages = []
                     for e in errors:
@@ -275,6 +300,13 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                             error_messages.append(str(e))
                     error_msg = ', '.join(error_messages) if error_messages else 'Unknown error'
                     error_msg_lower = error_msg.lower()
+                    
+                    # Check for ValidationException - use 5 retries for this specific error
+                    is_validation_exception = 'validationexception' in error_msg_lower or 'validation exception' in error_msg_lower
+                    if is_validation_exception and effective_max_retries < 5:
+                        effective_max_retries = 5
+                        log_print(f"      🔄 ValidationException detected - increasing retries to 5")
+                    
                     is_provider_rate_limit = (
                         'provider rate limit' in error_msg_lower or 
                         ('provider' in error_msg_lower and 'rate limit' in error_msg_lower) or
@@ -282,7 +314,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                     )
                     is_org_rate_limit = 'rate limit' in error_msg_lower and not is_provider_rate_limit
                     if is_provider_rate_limit:
-                        if attempt < max_retries - 1:
+                        if attempt < effective_max_retries - 1:
                             wait_time = 1.0 * (2 ** attempt)
                             time.sleep(wait_time)
                             continue
@@ -290,7 +322,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                             break
                         else:
                             return (f"API Error: {response.status_code}, Provider rate limit on all models - {error_msg[:200]}", current_model)
-                    if is_org_rate_limit and attempt < max_retries - 1:
+                    if is_org_rate_limit and attempt < effective_max_retries - 1:
                         reset_match = re.search(r'reset=(\\d+)', error_msg)
                         if reset_match:
                             wait_time = int(reset_match.group(1)) + 1
@@ -298,9 +330,17 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                             wait_time = 1.0 * (2 ** attempt)
                         time.sleep(wait_time)
                         continue
+                    
+                    # For ValidationException, retry with exponential backoff
+                    if is_validation_exception and attempt < effective_max_retries - 1:
+                        wait_time = 1.0 * (2 ** attempt)  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                        log_print(f"      ⏳ ValidationException retry {attempt + 1}/{effective_max_retries} (waiting {wait_time}s)...")
+                        time.sleep(wait_time)
+                        continue
+                    
                     return (f"API Error: {response.status_code}, {error_msg[:200]}", current_model)
             except requests.exceptions.RequestException as e:
-                if attempt < max_retries - 1:
+                if attempt < effective_max_retries - 1:
                     wait_time = 1.0 * (2 ** attempt)
                     time.sleep(wait_time)
                     continue

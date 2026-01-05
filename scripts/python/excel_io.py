@@ -45,6 +45,13 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
         log_print("❌ pandas is required for Excel file processing")
         sys.exit(1)
 
+    # CRITICAL: If run_id is provided and file doesn't exist on disk, try loading from database first
+    # This prevents overwriting existing Excel files that are stored in DB but not on ephemeral filesystem
+    run_id_from_config = None
+    if config_dict:
+        # Try to extract run_id from config_dict (passed from main.py workflow)
+        run_id_from_config = config_dict.get('_run_id') or config_dict.get('run_id')
+    
     # Resolve Excel file path - handle both absolute and relative paths
     excel_path = Path(excel_file)
     if not excel_path.is_absolute():
@@ -64,6 +71,20 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
                         excel_path_attempt = inputs_dir / Path(excel_file).name
                         if excel_path_attempt.exists():
                             excel_path = excel_path_attempt
+
+    # CRITICAL FIX: If file doesn't exist on disk but run_id is provided, try loading from database
+    # This prevents overwriting existing Excel files on Heroku (ephemeral filesystem)
+    if not excel_path.exists() and run_id_from_config and "run_" in str(excel_path):
+        try:
+            from app import load_excel_from_db
+            loaded_path = load_excel_from_db(run_id_from_config)
+            if loaded_path and Path(loaded_path).exists():
+                excel_path = Path(loaded_path)
+                log_print(f"   ✅ Loaded Excel file from database: {excel_path.name}")
+            else:
+                log_print(f"   ℹ️  Excel file not in database, will create new: {excel_path.name}")
+        except Exception as e:
+            log_print(f"   ⚠️  Could not load from database: {e}, will create new file")
 
     # For new runs, the Excel file may not exist yet - that's OK, we'll create it
     if not excel_path.exists():
@@ -308,13 +329,22 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
     final_df = pd.concat([final_df, bottom_df], ignore_index=True)
 
     # Write to Excel
+    # CRITICAL FIX: Always use append mode ('a') if file exists, even if just loaded from DB
+    # Never use 'w' mode for run-specific files as it would overwrite existing cycles
     from openpyxl import load_workbook
     excel_file_exists = Path(excel_file).exists()
+    is_run_file = "run_" in str(excel_file) and excel_file.endswith('.xlsx')
+    
     try:
-        if excel_file_exists:
+        # For run-specific files, ALWAYS use append mode to preserve existing cycles
+        # Only use 'w' mode for truly new files that don't exist anywhere
+        if excel_file_exists or is_run_file:
+            # File exists on disk OR this is a run file (might exist in DB but not on disk)
+            # Use append mode to preserve existing sheets
             with pd.ExcelWriter(excel_file, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
                 final_df.to_excel(writer, sheet_name=f"analysis_{refinement_stage}_cycle{cycle_number}_{Path(excel_file).stem}", index=False, header=False)
         else:
+            # Truly new file - safe to use 'w' mode
             with pd.ExcelWriter(excel_file, engine='openpyxl', mode='w') as writer:
                 final_df.to_excel(writer, sheet_name=f"analysis_{refinement_stage}_cycle{cycle_number}_{Path(excel_file).stem}", index=False, header=False)
     except Exception as e:
