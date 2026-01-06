@@ -298,7 +298,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                             },
                             "timestamp": int(_time_for_agent_log.time() * 1000)
                         })
-                        return (f"Job status changed to {status_check}", current_model)
+                        return (None, "ABORTED")
                 except Exception as e:
                     _agent_log("H4", "salesforce_api.py:invoke_prompt:abort_check_error", "job_status_check_error", {
                         "runId": effective_run_id,
@@ -417,7 +417,79 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                     if is_validation_exception and effective_max_retries < 5:
                         effective_max_retries = 5
                         log_print(f"      🔄 ValidationException detected - increasing retries to 5")
-                    # #region agent log
+                    
+                    # Enhanced logging for ValidationException - capture full error details
+                    if is_validation_exception:
+                        # Capture full error objects (not just messages)
+                        full_errors = []
+                        if errors:
+                            for e in errors:
+                                if isinstance(e, dict):
+                                    full_errors.append({
+                                        "message": e.get('message', ''),
+                                        "statusCode": e.get('statusCode', ''),
+                                        "errorCode": e.get('errorCode', ''),
+                                        "fields": e.get('fields', []),
+                                        "full_error": e  # Capture entire error object
+                                    })
+                                else:
+                                    full_errors.append({"raw": str(e)})
+                        
+                        # Capture full API response structure
+                        full_response_structure = {
+                            "isSuccess": result[0].get('isSuccess', False) if result and len(result) > 0 else None,
+                            "outputValues": result[0].get('outputValues', {}) if result and len(result) > 0 else {},
+                            "errors": full_errors,
+                            "result_length": len(result) if result else 0
+                        }
+                        
+                        # Capture request context
+                        request_context = {
+                            "prompt_name": prompt_name,
+                            "question_preview": question[:200] if question else "",
+                            "question_length": len(question) if question else 0,
+                            "model": current_model,
+                            "url": url
+                        }
+                        
+                        # #region agent log - Enhanced ValidationException logging
+                        payload_validation_exception = {
+                            "runId": effective_run_id,
+                            "model": current_model,
+                            "attempt": attempt,
+                            "model_idx": model_idx,
+                            "status_code": response.status_code,
+                            "error_msg": error_msg,  # Full error message, not truncated
+                            "is_validation_exception": True,
+                            "effective_max_retries": effective_max_retries,
+                            "full_errors": full_errors,
+                            "full_response_structure": full_response_structure,
+                            "request_context": request_context,
+                            "complete_result": result  # Full result object for deep inspection
+                        }
+                        _agent_log("H3", "salesforce_api.py:invoke_prompt:validation_exception", "validation_exception_full_details", payload_validation_exception)
+                        _agent_log_stdout({
+                            "sessionId": "debug-session",
+                            "runId": effective_run_id,
+                            "hypothesisId": "H3",
+                            "location": "salesforce_api.py:invoke_prompt:validation_exception",
+                            "message": "validation_exception_full_details",
+                            "data": payload_validation_exception,
+                            "timestamp": int(_time_for_agent_log.time() * 1000)
+                        })
+                        # #endregion
+                        
+                        # Also log to console for immediate visibility
+                        log_print(f"      ❌ ValidationException DETAILS:")
+                        log_print(f"         Question: {question[:100]}...")
+                        log_print(f"         Prompt: {prompt_name}")
+                        log_print(f"         Model: {current_model}")
+                        log_print(f"         Full Error Message: {error_msg}")
+                        if full_errors:
+                            for idx, err in enumerate(full_errors):
+                                log_print(f"         Error {idx+1}: {json.dumps(err, indent=10)}")
+                    
+                    # #region agent log - Standard error logging (for non-ValidationException errors)
                     payload_err200 = {
                         "runId": effective_run_id,
                         "model": current_model,
@@ -428,8 +500,9 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         "is_validation_exception": is_validation_exception,
                         "effective_max_retries": effective_max_retries,
                     }
-                    _agent_log("H2", "salesforce_api.py:invoke_prompt:error200", "invoke_prompt_error_200", payload_err200)
-                    _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H2", "location": "salesforce_api.py:invoke_prompt:error200", "message": "invoke_prompt_error_200", "data": payload_err200, "timestamp": int(_time_for_agent_log.time() * 1000)})
+                    if not is_validation_exception:  # Only log standard format for non-ValidationException
+                        _agent_log("H2", "salesforce_api.py:invoke_prompt:error200", "invoke_prompt_error_200", payload_err200)
+                        _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H2", "location": "salesforce_api.py:invoke_prompt:error200", "message": "invoke_prompt_error_200", "data": payload_err200, "timestamp": int(_time_for_agent_log.time() * 1000)})
                     # #endregion
                     
                     is_provider_rate_limit = (
@@ -482,9 +555,83 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                     if is_validation_exception and effective_max_retries < 5:
                         effective_max_retries = 5
                         log_print(f"      🔄 ValidationException detected - increasing retries to 5")
-                    # #region agent log
+                    
+                    # Enhanced logging for ValidationException (non-200 status) - capture full error details
+                    if is_validation_exception:
+                        # Capture full error objects (not just messages)
+                        full_errors = []
+                        if errors:
+                            for e in errors:
+                                if isinstance(e, dict):
+                                    full_errors.append({
+                                        "message": e.get('message', ''),
+                                        "statusCode": e.get('statusCode', ''),
+                                        "errorCode": e.get('errorCode', ''),
+                                        "fields": e.get('fields', []),
+                                        "full_error": e  # Capture entire error object
+                                    })
+                                else:
+                                    full_errors.append({"raw": str(e)})
+                        
+                        # Capture full API response structure
+                        full_response_structure = {
+                            "isSuccess": result[0].get('isSuccess', False) if result and len(result) > 0 else None,
+                            "outputValues": result[0].get('outputValues', {}) if result and len(result) > 0 else {},
+                            "errors": full_errors,
+                            "result_length": len(result) if result else 0,
+                            "response_text": response.text[:1000] if hasattr(response, 'text') and response.text else None,  # Capture raw response text
+                            "response_headers": dict(response.headers) if hasattr(response, 'headers') else None
+                        }
+                        
+                        # Capture request context
+                        request_context = {
+                            "prompt_name": prompt_name,
+                            "question_preview": question[:200] if question else "",
+                            "question_length": len(question) if question else 0,
+                            "model": current_model,
+                            "url": url
+                        }
+                        
+                        # #region agent log - Enhanced ValidationException logging (non-200)
+                        payload_validation_exception = {
+                            "runId": effective_run_id,
+                            "model": current_model,
+                            "attempt": attempt,
+                            "model_idx": model_idx,
+                            "status_code": response.status_code,
+                            "error_msg": error_msg,  # Full error message, not truncated
+                            "is_validation_exception": True,
+                            "effective_max_retries": effective_max_retries,
+                            "full_errors": full_errors,
+                            "full_response_structure": full_response_structure,
+                            "request_context": request_context,
+                            "complete_result": result  # Full result object for deep inspection
+                        }
+                        _agent_log("H3", "salesforce_api.py:invoke_prompt:validation_exception_non200", "validation_exception_full_details_non200", payload_validation_exception)
+                        _agent_log_stdout({
+                            "sessionId": "debug-session",
+                            "runId": effective_run_id,
+                            "hypothesisId": "H3",
+                            "location": "salesforce_api.py:invoke_prompt:validation_exception_non200",
+                            "message": "validation_exception_full_details_non200",
+                            "data": payload_validation_exception,
+                            "timestamp": int(_time_for_agent_log.time() * 1000)
+                        })
+                        # #endregion
+                        
+                        # Also log to console for immediate visibility
+                        log_print(f"      ❌ ValidationException DETAILS (HTTP {response.status_code}):")
+                        log_print(f"         Question: {question[:100]}...")
+                        log_print(f"         Prompt: {prompt_name}")
+                        log_print(f"         Model: {current_model}")
+                        log_print(f"         Full Error Message: {error_msg}")
+                        if full_errors:
+                            for idx, err in enumerate(full_errors):
+                                log_print(f"         Error {idx+1}: {json.dumps(err, indent=10)}")
+                    
+                    # #region agent log - Standard error logging (for non-ValidationException errors, non-200)
                     payload_err_non200 = {
-                        "runId": "unknown",
+                        "runId": effective_run_id,
                         "model": current_model,
                         "attempt": attempt,
                         "model_idx": model_idx,
@@ -493,8 +640,9 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         "is_validation_exception": is_validation_exception,
                         "effective_max_retries": effective_max_retries,
                     }
-                    _agent_log("H3", "salesforce_api.py:invoke_prompt:errorNon200", "invoke_prompt_error_non200", payload_err_non200)
-                    _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H3", "location": "salesforce_api.py:invoke_prompt:errorNon200", "message": "invoke_prompt_error_non200", "data": payload_err_non200, "timestamp": int(_time_for_agent_log.time() * 1000)})
+                    if not is_validation_exception:  # Only log standard format for non-ValidationException
+                        _agent_log("H3", "salesforce_api.py:invoke_prompt:errorNon200", "invoke_prompt_error_non200", payload_err_non200)
+                        _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H3", "location": "salesforce_api.py:invoke_prompt:errorNon200", "message": "invoke_prompt_error_non200", "data": payload_err_non200, "timestamp": int(_time_for_agent_log.time() * 1000)})
                     # #endregion
                     
                     is_provider_rate_limit = (
