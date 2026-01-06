@@ -311,6 +311,36 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
     log_print(f"      📍 Instance URL: {instance_url}")
     log_print(f"      📋 Prompt name: {prompt_name}")
     
+    # CRITICAL: Verify prompt template exists and is active BEFORE making API calls
+    # This will help diagnose if the prompt template is broken/missing
+    try:
+        log_print(f"      🔍 Verifying prompt template '{prompt_name}' exists and is active...")
+        xml_content = retrieve_metadata_via_api(instance_url, access_token, "GenAiPromptTemplate", prompt_name)
+        if xml_content:
+            root = ET.fromstring(xml_content)
+            ns = {'met': 'http://soap.sforce.com/2006/04/metadata'}
+            active_version = root.find('.//met:activeVersionIdentifier', ns)
+            if active_version is not None:
+                active_id = active_version.text
+                log_print(f"      ✅ Prompt template '{prompt_name}' exists with active version: {active_id}")
+                # Try to find input fields in the template
+                input_fields = root.findall('.//met:inputFields', ns)
+                if input_fields:
+                    log_print(f"      📋 Found {len(input_fields)} input field(s) in template")
+                    for field in input_fields:
+                        field_name = field.find('met:name', ns)
+                        field_type = field.find('met:type', ns)
+                        if field_name is not None:
+                            log_print(f"         - Input field: {field_name.text} (type: {field_type.text if field_type is not None else 'unknown'})")
+                else:
+                    log_print(f"      ⚠️  No input fields found in template metadata")
+            else:
+                log_print(f"      ❌ Prompt template '{prompt_name}' has NO active version!")
+        else:
+            log_print(f"      ❌ Prompt template '{prompt_name}' NOT FOUND in Salesforce!")
+    except Exception as e:
+        log_print(f"      ⚠️  Could not verify prompt template: {e}")
+    
     for model_idx, current_model in enumerate(models_to_try):
         if model_idx > 0:
             log_print(f"      🔄 Trying fallback model {model_idx + 1}/{len(models_to_try)}: {current_model}")
