@@ -320,6 +320,13 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
         
         # Log the exact request being made (for debugging auth issues)
         log_print(f"      🔍 Request details: URL={url}, token_preview={access_token[:20] if access_token else 'None'}..., payload_keys={list(payload.keys())}")
+        # CRITICAL: Log the FULL payload structure to see if format is correct
+        payload_str = json.dumps(payload, indent=2)
+        log_print(f"      📦 Full payload structure:")
+        # Split into lines and log each (to avoid truncation)
+        for line in payload_str.split('\n'):
+            log_print(f"         {line}")
+        log_print(f"      📝 Question in payload: '{sanitized_question[:100]}...' ({len(sanitized_question)} chars)")
         
         # Start with default retries, but will increase to 5 if ValidationException is detected
         effective_max_retries = max_retries
