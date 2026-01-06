@@ -224,7 +224,7 @@ def clean_html_response(text):
     return text.strip()
 
 
-def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries=3, model_used=None, models_list=None):
+def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries=3, model_used=None, models_list=None, run_id=None):
     """Invoke prompt template via REST API with retry logic and logging.
     
     Note: ValidationException errors automatically get 5 retries instead of the default max_retries.
@@ -238,7 +238,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
     
     # #region agent log
     payload_init = {
-        "runId": "unknown",
+        "runId": run_id or "unknown",
         "prompt_name": prompt_name,
         "models_to_try": models_to_try,
         "question_len": len(question) if question else 0,
@@ -281,7 +281,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         prompt_response = result[0].get('outputValues', {}).get('promptResponse', '')
                         # #region agent log
                         payload_success = {
-                            "runId": "unknown",
+                            "runId": run_id or "unknown",
                             "model": current_model,
                             "attempt": attempt,
                             "model_idx": model_idx,
@@ -308,12 +308,64 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                     
                     # Check for ValidationException - use 5 retries for this specific error
                     is_validation_exception = 'validationexception' in error_msg_lower or 'validation exception' in error_msg_lower
+                    # Abort if job is no longer active
+                    if run_id:
+                        try:
+                            status_check = None
+                            conn = get_db_connection()
+                            if conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("SELECT status FROM runs WHERE run_id = %s", (run_id,))
+                                    row = cur.fetchone()
+                                    if row:
+                                        status_check = row[0]
+                            if conn:
+                                conn.close()
+                            if status_check and status_check not in ('running', 'queued', 'interrupted'):
+                                _agent_log("H4", "salesforce_api.py:invoke_prompt:abort", "job_status_changed_abort", {
+                                    "runId": run_id,
+                                    "status": status_check,
+                                    "model": current_model,
+                                    "attempt": attempt
+                                })
+                                _agent_log_stdout({
+                                    "sessionId": "debug-session",
+                                    "runId": run_id,
+                                    "hypothesisId": "H4",
+                                    "location": "salesforce_api.py:invoke_prompt:abort",
+                                    "message": "job_status_changed_abort",
+                                    "data": {
+                                        "runId": run_id,
+                                        "status": status_check,
+                                        "model": current_model,
+                                        "attempt": attempt
+                                    },
+                                    "timestamp": int(_time_for_agent_log.time() * 1000)
+                                })
+                                return (f"Job status changed to {status_check}", current_model)
+                        except Exception as e:
+                            _agent_log("H4", "salesforce_api.py:invoke_prompt:abort_check_error", "job_status_check_error", {
+                                "runId": run_id,
+                                "error": str(e)
+                            })
+                            _agent_log_stdout({
+                                "sessionId": "debug-session",
+                                "runId": run_id,
+                                "hypothesisId": "H4",
+                                "location": "salesforce_api.py:invoke_prompt:abort_check_error",
+                                "message": "job_status_check_error",
+                                "data": {
+                                    "runId": run_id,
+                                    "error": str(e)
+                                },
+                                "timestamp": int(_time_for_agent_log.time() * 1000)
+                            })
                     if is_validation_exception and effective_max_retries < 5:
                         effective_max_retries = 5
                         log_print(f"      🔄 ValidationException detected - increasing retries to 5")
                     # #region agent log
                     payload_err200 = {
-                        "runId": "unknown",
+                        "runId": run_id or "unknown",
                         "model": current_model,
                         "attempt": attempt,
                         "model_idx": model_idx,
