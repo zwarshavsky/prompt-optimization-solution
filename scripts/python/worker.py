@@ -27,7 +27,8 @@ from worker_utils import (
     mark_job_as_completed,
     update_job_progress,
     update_job_heartbeat,
-    load_pdfs_from_db
+    load_pdfs_from_db,
+    get_job_status
 )
 
 try:
@@ -242,6 +243,12 @@ def process_job(run_id: str, resume_info: Optional[Dict[str, Any]] = None) -> bo
             # Check if shutdown was requested during execution
             if shutdown_requested:
                 print(f"[WORKER] Shutdown requested during job execution. Job will be marked as interrupted.", flush=True)
+                return False
+
+            # Check if job was killed during workflow (status may have been set to failed/interrupted)
+            status_after = get_job_status(run_id)
+            if status_after and status_after not in ('running',):
+                print(f"[WORKER] Job {run_id} status is '{status_after}' after workflow run; not marking complete.", flush=True)
                 return False
             
             # Mark as completed
