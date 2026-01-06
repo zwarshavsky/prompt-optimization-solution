@@ -225,6 +225,47 @@ def clean_html_response(text):
     return text.strip()
 
 
+def sanitize_question(question: str) -> str:
+    """Sanitize question text to prevent ValidationException errors.
+    
+    Removes or replaces characters that may trigger Salesforce API validation errors:
+    - Problematic parentheses, brackets, special unicode
+    - Preserves question meaning while making it API-safe
+    
+    Returns sanitized question and logs changes if any were made.
+    """
+    if not question:
+        return question
+    
+    original = question
+    sanitized = question
+    
+    # Replace problematic characters that might cause validation errors
+    # Replace curly quotes with straight quotes
+    sanitized = sanitized.replace('"', '"').replace('"', '"')
+    sanitized = sanitized.replace(''', "'").replace(''', "'")
+    
+    # Replace em/en dashes with hyphens
+    sanitized = sanitized.replace('—', '-').replace('–', '-')
+    
+    # Remove zero-width characters and other invisible unicode
+    sanitized = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]', '', sanitized)
+    
+    # Normalize whitespace (multiple spaces/tabs to single space)
+    sanitized = re.sub(r'[ \t]+', ' ', sanitized)
+    
+    # Remove leading/trailing whitespace
+    sanitized = sanitized.strip()
+    
+    # Log if any changes were made
+    if sanitized != original:
+        log_print(f"      🔧 Question sanitized (removed problematic characters)")
+        log_print(f"         Original length: {len(original)} chars")
+        log_print(f"         Sanitized length: {len(sanitized)} chars")
+    
+    return sanitized
+
+
 def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries=3, model_used=None, models_list=None, run_id=None):
     """Invoke prompt template via REST API with retry logic and logging.
     
@@ -252,12 +293,15 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
 
     session = requests.Session()
     
+    # Sanitize question before sending to API to prevent ValidationException errors
+    sanitized_question = sanitize_question(question)
+    
     for model_idx, current_model in enumerate(models_to_try):
         if model_idx > 0:
             log_print(f"      🔄 Trying fallback model {model_idx + 1}/{len(models_to_try)}: {current_model}")
         url = f"{instance_url}/services/data/v65.0/actions/custom/generatePromptResponse/{prompt_name}"
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-        payload = {"inputs": [{"Input:Question": question}]}
+        payload = {"inputs": [{"Input:Question": sanitized_question}]}
         
         # Start with default retries, but will increase to 5 if ValidationException is detected
         effective_max_retries = max_retries
