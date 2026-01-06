@@ -321,3 +321,20 @@ def update_job_progress(run_id: str, progress: Dict[str, Any], output_line: Opti
     finally:
         conn.close()
 
+
+def get_job_status(run_id: str) -> Optional[str]:
+    """Retrieve the current status of a job from the database."""
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM runs WHERE run_id = %s", (run_id,))
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception as e:
+        print(f"Error getting job status for {run_id}: {e}", flush=True)
+        return None
+    finally:
+        conn.close()
+
