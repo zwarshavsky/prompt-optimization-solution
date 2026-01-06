@@ -2031,6 +2031,24 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                     cycle_number=cycle_number,
                     config_dict=yaml_config_with_run_id
                 )
+                # Abort if job was killed during prompt invocations
+                try:
+                    status_check = None
+                    conn = get_db_connection()
+                    if conn:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT status FROM runs WHERE run_id = %s", (run_id,))
+                            row = cur.fetchone()
+                            if row:
+                                status_check = row[0]
+                    if conn:
+                        conn.close()
+                    if status_check and status_check not in ('running', 'queued', 'interrupted'):
+                        log_print(f"❌ Job {run_id} status changed to '{status_check}' during Step 2. Aborting workflow.")
+                        raise RuntimeError(f"Job aborted due to status '{status_check}'")
+                except Exception as e:
+                    # Re-raise to be caught by outer handler
+                    raise
                 
                 log_print(f"\n✅ Step 2 Complete: Created sheet '{new_sheet_name}' with prompt responses")
                 
