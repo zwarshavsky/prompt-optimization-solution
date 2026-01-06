@@ -305,12 +305,21 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
     #     log_print(f"      ✓ Question passed sanitization unchanged ({len(question)} chars)")
     log_print(f"      📤 Sending question (no sanitization): '{question[:100]}...' ({len(question)} chars)")
     
+    # AUTHENTICATION CHECK: Verify token is valid before making API calls
+    # If token is invalid/expired, ValidationException can occur
+    log_print(f"      🔐 Verifying authentication token (length: {len(access_token) if access_token else 0} chars)")
+    log_print(f"      📍 Instance URL: {instance_url}")
+    log_print(f"      📋 Prompt name: {prompt_name}")
+    
     for model_idx, current_model in enumerate(models_to_try):
         if model_idx > 0:
             log_print(f"      🔄 Trying fallback model {model_idx + 1}/{len(models_to_try)}: {current_model}")
         url = f"{instance_url}/services/data/v65.0/actions/custom/generatePromptResponse/{prompt_name}"
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
         payload = {"inputs": [{"Input:Question": sanitized_question}]}
+        
+        # Log the exact request being made (for debugging auth issues)
+        log_print(f"      🔍 Request details: URL={url}, token_preview={access_token[:20] if access_token else 'None'}..., payload_keys={list(payload.keys())}")
         
         # Start with default retries, but will increase to 5 if ValidationException is detected
         effective_max_retries = max_retries
@@ -374,6 +383,18 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
             attempt += 1
             try:
                 response = session.post(url, headers=headers, json=payload, timeout=60)
+                
+                # Check for authentication errors (401 Unauthorized, 403 Forbidden)
+                if response.status_code == 401:
+                    log_print(f"      ❌ AUTHENTICATION ERROR (401): Token may be expired or invalid")
+                    log_print(f"      🔄 This could cause ValidationException - token needs refresh")
+                    # Don't retry with same token, it will fail again
+                    return (f"Authentication Error (401): Token expired or invalid. Please re-authenticate.", current_model)
+                elif response.status_code == 403:
+                    log_print(f"      ❌ AUTHORIZATION ERROR (403): Token lacks permission for this API")
+                    log_print(f"      🔄 This could cause ValidationException - insufficient permissions")
+                    return (f"Authorization Error (403): Insufficient permissions for prompt API.", current_model)
+                
                 try:
                     result = response.json()
                 except:
