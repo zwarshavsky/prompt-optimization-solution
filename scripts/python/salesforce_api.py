@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Any
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import time as _time_for_agent_log
+from worker_utils import get_db_connection
 
 # Helper function for immediate output flushing
 def log_print(*args, **kwargs):
