@@ -11,6 +11,7 @@ import time
 import json
 from datetime import datetime
 from typing import Dict, Any, Optional
+from pathlib import Path
 
 # Add current directory to path
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -43,6 +44,26 @@ shutdown_requested = False
 current_job_id = None
 current_checkpoint = None
 
+# #region agent log
+def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: Dict[str, Any]):
+    """Write a compact NDJSON log for debug-mode analysis."""
+    try:
+        payload = {
+            "sessionId": "debug-session",
+            "runId": data.get("run_id") or data.get("runId") or current_job_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        log_path = "/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/.cursor/debug.log"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+    except Exception:
+        # Logging must never break the worker
+        pass
+# #endregion
 
 def signal_handler(signum, frame):
     """Handle SIGTERM for graceful shutdown"""
@@ -72,6 +93,21 @@ def worker_progress_callback(status_dict: Dict[str, Any]):
         return
     
     try:
+        # #region agent log
+        _agent_debug_log(
+            hypothesis_id="H1",
+            location="worker.py:worker_progress_callback:entry",
+            message="progress_cb_entry",
+            data={
+                "run_id": run_id,
+                "status": status_dict.get("status"),
+                "step": status_dict.get("step"),
+                "cycle": status_dict.get("cycle"),
+                "stage_status": status_dict.get("stage_status"),
+            },
+        )
+        # #endregion
+
         # Extract checkpoint info from status
         cycle = status_dict.get('cycle', 0)
         step = status_dict.get('step', 0)
@@ -99,6 +135,20 @@ def worker_progress_callback(status_dict: Dict[str, Any]):
         
         # Update heartbeat
         update_job_heartbeat(run_id)
+        # #region agent log
+        _agent_debug_log(
+            hypothesis_id="H1",
+            location="worker.py:worker_progress_callback:after_db",
+            message="progress_cb_db_update",
+            data={
+                "run_id": run_id,
+                "status": status,
+                "step": step,
+                "cycle": cycle,
+                "heartbeat": True,
+            },
+        )
+        # #endregion
         
         # Save Excel file to database if provided (after Step 2 or Step 3)
         excel_file_path = status_dict.get('excel_file')
@@ -120,6 +170,14 @@ def worker_progress_callback(status_dict: Dict[str, Any]):
         print(f"[WORKER] Error in progress callback: {e}", flush=True)
         import traceback
         traceback.print_exc()
+        # #region agent log
+        _agent_debug_log(
+            hypothesis_id="H2",
+            location="worker.py:worker_progress_callback:error",
+            message="progress_cb_exception",
+            data={"run_id": run_id, "error": str(e)},
+        )
+        # #endregion
 
 
 def process_job(run_id: str, resume_info: Optional[Dict[str, Any]] = None) -> bool:
@@ -231,6 +289,18 @@ def process_job(run_id: str, resume_info: Optional[Dict[str, Any]] = None) -> bo
         
         # Execute workflow
         print(f"[WORKER] Starting workflow execution for job {run_id}...", flush=True)
+        # #region agent log
+        _agent_debug_log(
+            hypothesis_id="H3",
+            location="worker.py:process_job:before_run_full_workflow",
+            message="starting_run_full_workflow",
+            data={
+                "run_id": run_id,
+                "resume": bool(resume_params),
+                "config_keys": list(yaml_config.keys()) if isinstance(yaml_config, dict) else [],
+            },
+        )
+        # #endregion
         
         try:
             results = run_full_workflow(
