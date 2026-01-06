@@ -293,8 +293,17 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
 
     session = requests.Session()
     
+    # TEMPORARILY DISABLE SANITIZATION TO TEST IF IT'S CAUSING ISSUES
     # Sanitize question before sending to API to prevent ValidationException errors
-    sanitized_question = sanitize_question(question)
+    # sanitized_question = sanitize_question(question)
+    sanitized_question = question  # Use original question without sanitization
+    
+    # Log what we're actually sending (for debugging)
+    # if sanitized_question != question:
+    #     log_print(f"      🔧 Question was sanitized (original: {len(question)} chars, sanitized: {len(sanitized_question)} chars)")
+    # else:
+    #     log_print(f"      ✓ Question passed sanitization unchanged ({len(question)} chars)")
+    log_print(f"      📤 Sending question (no sanitization): '{question[:100]}...' ({len(question)} chars)")
     
     for model_idx, current_model in enumerate(models_to_try):
         if model_idx > 0:
