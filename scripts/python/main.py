@@ -2033,6 +2033,7 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                 )
                 # Abort if job was killed during prompt invocations
                 try:
+                    from worker_utils import get_db_connection
                     status_check = None
                     conn = get_db_connection()
                     if conn:

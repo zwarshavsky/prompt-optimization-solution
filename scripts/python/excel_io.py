@@ -207,11 +207,25 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
         log_print(f"      Question: {q_text[:80]}...")
         try:
             result, model_used = invoke_prompt(instance_url, access_token, q_text, prompt_dev_name, max_retries=3, model_used=None, models_list=models_list, run_id=config_dict.get('_run_id') or config_dict.get('run_id') if config_dict else None)
+            
+            # CRITICAL: Check if job was killed/aborted
+            if model_used == "ABORTED":
+                run_id = config_dict.get('_run_id') or config_dict.get('run_id') if config_dict else None
+                log_print(f"   🛑 ABORTING: Job {run_id} was killed during prompt invocation. Stopping workflow.", flush=True)
+                raise RuntimeError(f"Job {run_id} aborted during prompt invocation.")
+            
+            # Handle None result (shouldn't happen normally, but be safe)
+            if result is None:
+                result = "No response received"
+            
             log_print(f"      ✅ Response received (model: {model_used}, length: {len(result)} chars)")
             if 'Error' in result or 'API Error' in result:
                 log_print(f"   ⚠️  {q_num}: Error - {result[:100]}")
             else:
                 log_print(f"   ✅ {q_num}: Success")
+        except RuntimeError:
+            # Re-raise RuntimeError (abort) to stop the workflow
+            raise
         except Exception as e:
             result = f"Error invoking prompt: {e}"
             model_used = "Unknown"
