@@ -274,18 +274,105 @@ def load_pdfs_from_db(run_id: str, output_dir: Optional[str] = None) -> List[str
 
 
 def update_job_progress(run_id: str, progress: Dict[str, Any], output_line: Optional[str] = None) -> bool:
-    """Update job progress and optionally add output line. Also ensures status is 'running' if job is active."""
+    """Update job progress and optionally add output line. Also ensures status is 'running' if job is active.
+    
+    Tracks step timings:
+    - On 'step_start': Stores start time in progress['step_start_times']
+    - On 'step_complete': Calculates duration and appends to progress['step_timings'] array
+    """
     conn = get_db_connection()
     if not conn:
         return False
     
     try:
         with conn.cursor() as cur:
-            # Get current output_lines and status
-            cur.execute("SELECT output_lines, status FROM runs WHERE run_id = %s", (run_id,))
+            # Get current progress, output_lines, and status
+            cur.execute("SELECT progress, output_lines, status FROM runs WHERE run_id = %s", (run_id,))
             row = cur.fetchone()
-            output_lines = row[0] if row and row[0] else []
-            current_status = row[1] if row and len(row) > 1 else 'unknown'
+            current_progress = row[0] if row and row[0] else {}
+            output_lines = row[1] if row and row[1] else []
+            current_status = row[2] if row and len(row) > 2 else 'unknown'
+            
+            # Ensure current_progress is a dict
+            if not isinstance(current_progress, dict):
+                current_progress = {}
+            
+            # Handle step timing tracking
+            status = progress.get('status', '')
+            cycle = progress.get('cycle')
+            step = progress.get('step')
+            current_time = datetime.now().isoformat()
+            
+            # Initialize step_timings array if it doesn't exist
+            if 'step_timings' not in current_progress:
+                current_progress['step_timings'] = []
+            
+            # Initialize step_start_times dict if it doesn't exist (temporary storage for start times)
+            if 'step_start_times' not in current_progress:
+                current_progress['step_start_times'] = {}
+            
+            # Track step start
+            if status == 'step_start' and cycle is not None and step is not None:
+                step_key = f"{cycle}_{step}"
+                current_progress['step_start_times'][step_key] = current_time
+                # Also merge this into the progress dict we're about to save
+                progress['step_start_times'] = current_progress['step_start_times']
+            
+            # Track step completion and calculate duration
+            elif status == 'step_complete' and cycle is not None and step is not None:
+                step_key = f"{cycle}_{step}"
+                
+                # Get start time (from step_start_times or use previous step's completed_at as fallback)
+                started_at = current_progress['step_start_times'].get(step_key)
+                
+                # Fallback: if no start time recorded, try to use previous step's completed_at
+                if not started_at and current_progress['step_timings']:
+                    # Find the last timing entry for this cycle
+                    last_timing = None
+                    for timing in reversed(current_progress['step_timings']):
+                        if timing.get('cycle') == cycle:
+                            last_timing = timing
+                            break
+                    if last_timing:
+                        started_at = last_timing.get('completed_at')
+                
+                # Final fallback: use current time minus 1 second (shouldn't happen in normal flow)
+                if not started_at:
+                    from datetime import timedelta
+                    started_at = (datetime.now() - timedelta(seconds=1)).isoformat()
+                
+                # Calculate duration
+                try:
+                    start_dt = datetime.fromisoformat(started_at.replace('Z', '+00:00') if 'Z' in started_at else started_at)
+                    end_dt = datetime.fromisoformat(current_time.replace('Z', '+00:00') if 'Z' in current_time else current_time)
+                    duration_seconds = (end_dt - start_dt).total_seconds()
+                except Exception as e:
+                    print(f"Warning: Could not calculate duration for step {cycle}.{step}: {e}", flush=True)
+                    duration_seconds = 0.0
+                
+                # Create timing entry
+                timing_entry = {
+                    'cycle': cycle,
+                    'step': step,
+                    'started_at': started_at,
+                    'completed_at': current_time,
+                    'duration_seconds': round(duration_seconds, 2),
+                    'status': 'complete'
+                }
+                
+                # Append to step_timings array
+                current_progress['step_timings'].append(timing_entry)
+                
+                # Clean up the start time for this step (no longer needed)
+                if step_key in current_progress['step_start_times']:
+                    del current_progress['step_start_times'][step_key]
+                
+                # Merge step_timings and step_start_times into progress dict
+                progress['step_timings'] = current_progress['step_timings']
+                progress['step_start_times'] = current_progress['step_start_times']
+            
+            # Merge current_progress with new progress (new values override old ones)
+            merged_progress = {**current_progress, **progress}
             
             # Add new output line if provided
             if output_line:
@@ -311,11 +398,13 @@ def update_job_progress(run_id: str, progress: Dict[str, Any], output_line: Opti
                     heartbeat_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE run_id = %s
-            """, (json.dumps(progress), json.dumps(output_lines), status_to_set, run_id))
+            """, (json.dumps(merged_progress), json.dumps(output_lines), status_to_set, run_id))
             conn.commit()
             return cur.rowcount > 0
     except Exception as e:
         print(f"Error updating job progress: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
         conn.rollback()
         return False
     finally:
