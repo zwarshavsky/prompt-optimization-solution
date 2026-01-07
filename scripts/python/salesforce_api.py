@@ -267,28 +267,22 @@ def sanitize_question(question: str) -> str:
 
 
 def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries=3, model_used=None, models_list=None, run_id=None):
-    """Invoke prompt template via REST API with retry logic and logging.
+    """Invoke prompt template via Generations REST API with retry logic and logging.
     
     Note: ValidationException errors automatically get 5 retries instead of the default max_retries.
+    Uses the Generations API endpoint which supports more control over prompt invocation.
     """
-    if models_list and len(models_list) > 0:
-        models_to_try = models_list
-    elif model_used:
-        models_to_try = [model_used]
-    else:
-        models_to_try = ["Unknown"]
-    
     # #region agent log
     effective_run_id = run_id or "unknown"
     payload_init = {
         "runId": effective_run_id,
         "prompt_name": prompt_name,
-        "models_to_try": models_to_try,
         "question_len": len(question) if question else 0,
         "question_preview": (question[:120] + "…") if question and len(question) > 120 else question,
+        "hypothesis": "H5: Token limit exceeded due to LLM parser prompt optimization creating larger chunks over cycles"
     }
-    _agent_log("H1", "salesforce_api.py:invoke_prompt:init", "invoke_prompt_start", payload_init)
-    _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H1", "location": "salesforce_api.py:invoke_prompt:init", "message": "invoke_prompt_start", "data": payload_init, "timestamp": int(_time_for_agent_log.time() * 1000)})
+    _agent_log("H5", "salesforce_api.py:invoke_prompt:init", "invoke_prompt_start", payload_init)
+    _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H5", "location": "salesforce_api.py:invoke_prompt:init", "message": "invoke_prompt_start", "data": payload_init, "timestamp": int(_time_for_agent_log.time() * 1000)})
     # #endregion
 
     session = requests.Session()
@@ -324,7 +318,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                 active_id = active_version.text
                 log_print(f"      ✅ Prompt template '{prompt_name}' exists with active version: {active_id}")
                 # Try to find input fields in the template
-                input_fields = root.findall('.//met:inputFields', ns)
+                input_fields = root.findall('.//met:inputs', ns)
                 if input_fields:
                     log_print(f"      📋 Found {len(input_fields)} input field(s) in template")
                     for field in input_fields:
@@ -341,28 +335,45 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
     except Exception as e:
         log_print(f"      ⚠️  Could not verify prompt template: {e}")
     
-    for model_idx, current_model in enumerate(models_to_try):
-        if model_idx > 0:
-            log_print(f"      🔄 Trying fallback model {model_idx + 1}/{len(models_to_try)}: {current_model}")
-        url = f"{instance_url}/services/data/v65.0/actions/custom/generatePromptResponse/{prompt_name}"
-        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-        payload = {"inputs": [{"Input:Question": sanitized_question}]}
+    # Use Generations API endpoint (no fallback models - uses template default)
+    url = f"{instance_url}/services/data/v65.0/einstein/prompt-templates/{prompt_name}/generations"
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    
+    # Build Generations API payload structure
+    payload = {
+        "isPreview": False,
+        "inputParams": {
+            "valueMap": {
+                "Input:Question": {
+                    "value": sanitized_question
+                }
+            }
+        },
+        "additionalConfig": {
+            "applicationName": "PromptTemplateGenerationsInvocable",
+            "temperature": 0.0,
+            "maxTokens": 2000,
+            "numGenerations": 1,
+            "frequencyPenalty": 0.0,
+            "presencePenalty": 0.0
+        }
+    }
         
-        # Log the exact request being made (for debugging auth issues)
-        log_print(f"      🔍 Request details: URL={url}, token_preview={access_token[:20] if access_token else 'None'}..., payload_keys={list(payload.keys())}")
-        # CRITICAL: Log the FULL payload structure to see if format is correct
-        payload_str = json.dumps(payload, indent=2)
-        log_print(f"      📦 Full payload structure:")
-        # Split into lines and log each (to avoid truncation)
-        for line in payload_str.split('\n'):
-            log_print(f"         {line}")
-        log_print(f"      📝 Question in payload: '{sanitized_question[:100]}...' ({len(sanitized_question)} chars)")
-        
-        # Start with default retries, but will increase to 5 if ValidationException is detected
-        effective_max_retries = max_retries
-        attempt = 0
-        
-        while attempt < effective_max_retries:
+    # Log the exact request being made (for debugging auth issues)
+    log_print(f"      🔍 Request details: URL={url}, token_preview={access_token[:20] if access_token else 'None'}..., payload_keys={list(payload.keys())}")
+    # CRITICAL: Log the FULL payload structure to see if format is correct
+    payload_str = json.dumps(payload, indent=2)
+    log_print(f"      📦 Full payload structure:")
+    # Split into lines and log each (to avoid truncation)
+    for line in payload_str.split('\n'):
+        log_print(f"         {line}")
+    log_print(f"      📝 Question in payload: '{sanitized_question[:100]}...' ({len(sanitized_question)} chars)")
+    
+    # Start with default retries, but will increase to 5 if ValidationException is detected
+    effective_max_retries = max_retries
+    attempt = 0
+    
+    while attempt < effective_max_retries:
             # Abort if job is no longer active
             if run_id:
                 try:
@@ -380,7 +391,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         _agent_log("H4", "salesforce_api.py:invoke_prompt:abort", "job_status_changed_abort", {
                             "runId": effective_run_id,
                             "status": status_check,
-                            "model": current_model,
+                            "model": "template_default",
                             "attempt": attempt + 1
                         })
                         _agent_log_stdout({
@@ -426,11 +437,11 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                     log_print(f"      ❌ AUTHENTICATION ERROR (401): Token may be expired or invalid")
                     log_print(f"      🔄 This could cause ValidationException - token needs refresh")
                     # Don't retry with same token, it will fail again
-                    return (f"Authentication Error (401): Token expired or invalid. Please re-authenticate.", current_model)
+                    return (f"Authentication Error (401): Token expired or invalid. Please re-authenticate.", "template_default")
                 elif response.status_code == 403:
                     log_print(f"      ❌ AUTHORIZATION ERROR (403): Token lacks permission for this API")
                     log_print(f"      🔄 This could cause ValidationException - insufficient permissions")
-                    return (f"Authorization Error (403): Insufficient permissions for prompt API.", current_model)
+                    return (f"Authorization Error (403): Insufficient permissions for prompt API.", "template_default")
                 
                 try:
                     result = response.json()
@@ -439,35 +450,37 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                     if attempt < effective_max_retries - 1:
                         time.sleep(0.2 * (attempt + 1))
                         continue
-                    return (f"API Error: {response.status_code}, JSON parse failed, response: '{response_text[:200]}', url='{url}'", current_model)
+                    return (f"API Error: {response.status_code}, JSON parse failed, response: '{response_text[:200]}', url='{url}'", "template_default")
                 
-                if response.status_code == 200:
-                    if result and len(result) > 0 and result[0].get('isSuccess', False):
-                        prompt_response = result[0].get('outputValues', {}).get('promptResponse', '')
+                # Generations API returns 200 or 201 on success
+                if response.status_code in [200, 201]:
+                    # Generations API response structure: {"generations": [{"text": "..."}], ...}
+                    if result.get("generations") and len(result["generations"]) > 0:
+                        prompt_response = result["generations"][0].get("text", "")
                         # #region agent log
                         payload_success = {
                             "runId": effective_run_id,
-                            "model": current_model,
+                            "model": "template_default",
                             "attempt": attempt,
-                            "model_idx": model_idx,
                             "status_code": response.status_code,
                         }
                         _agent_log("H1", "salesforce_api.py:invoke_prompt:success", "invoke_prompt_success", payload_success)
                         _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H1", "location": "salesforce_api.py:invoke_prompt:success", "message": "invoke_prompt_success", "data": payload_success, "timestamp": int(_time_for_agent_log.time() * 1000)})
                         # #endregion
-                        return (clean_html_response(prompt_response), current_model)
+                        return (clean_html_response(prompt_response), "template_default")
                     
-                    errors = result[0].get('errors', []) if result and len(result) > 0 else []
-                    if errors:
+                    # Error handling for Generations API
+                    error_msg = 'Unknown error - No generations in response'
+                    if "errors" in result:
                         error_messages = []
-                        for e in errors:
+                        for e in result["errors"]:
                             if isinstance(e, dict):
                                 error_messages.append(e.get('message') or str(e))
                             else:
                                 error_messages.append(str(e))
-                        error_msg = ', '.join(error_messages) if error_messages else 'Unknown error'
-                    else:
-                        error_msg = 'Unknown error - isSuccess was False'
+                        error_msg = ', '.join(error_messages) if error_messages else error_msg
+                    elif "message" in result:
+                        error_msg = result["message"]
                     
                     error_msg_lower = error_msg.lower()
                     
@@ -490,7 +503,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                                 _agent_log("H4", "salesforce_api.py:invoke_prompt:abort", "job_status_changed_abort", {
                                     "runId": run_id,
                                     "status": status_check,
-                                    "model": current_model,
+                                    "model": "template_default",
                                     "attempt": attempt
                                 })
                                 _agent_log_stdout({
@@ -502,12 +515,12 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                                     "data": {
                                         "runId": run_id,
                                         "status": status_check,
-                                        "model": current_model,
+                                        "model": "template_default",
                                         "attempt": attempt
                                     },
                                     "timestamp": int(_time_for_agent_log.time() * 1000)
                                 })
-                                return (f"Job status changed to {status_check}", current_model)
+                                return (f"Job status changed to {status_check}", "template_default")
                         except Exception as e:
                             _agent_log("H4", "salesforce_api.py:invoke_prompt:abort_check_error", "job_status_check_error", {
                                 "runId": run_id,
@@ -533,25 +546,60 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                     if is_validation_exception:
                         # Capture full error objects (not just messages)
                         full_errors = []
-                        if errors:
-                            for e in errors:
+                        bedrock_error_details = None  # Extract nested Bedrock error if present
+                        if "errors" in result:
+                            for e in result["errors"]:
                                 if isinstance(e, dict):
-                                    full_errors.append({
+                                    error_dict = {
                                         "message": e.get('message', ''),
                                         "statusCode": e.get('statusCode', ''),
                                         "errorCode": e.get('errorCode', ''),
                                         "fields": e.get('fields', []),
                                         "full_error": e  # Capture entire error object
-                                    })
+                                    }
+                                    full_errors.append(error_dict)
+                                    
+                                    # Extract nested Bedrock error from parameters (if present)
+                                    parameters = e.get('parameters', [])
+                                    for param in parameters:
+                                        param_value = param.get('value', '')
+                                        if isinstance(param_value, str) and ('too long' in param_value.lower() or 'bedrockruntime' in param_value.lower() or 'token' in param_value.lower()):
+                                            # CRITICAL: Check if this is a Bedrock SERVICE layer limit (not model limit)
+                                            is_bedrock_service_limit = 'bedrockruntime' in param_value.lower() and ('service' in param_value.lower() or 'on-demand' in param_value.lower() or 'throughput' in param_value.lower())
+                                            # Extract token limit numbers if present (e.g., "65536", "8192")
+                                            import re
+                                            token_limit_match = re.search(r'(\d{1,6})\s*token', param_value, re.IGNORECASE)
+                                            detected_token_limit = int(token_limit_match.group(1)) if token_limit_match else None
+                                            
+                                            bedrock_error_details = {
+                                                "parameter_name": param.get('name', ''),
+                                                "bedrock_error": param_value,
+                                                "contains_token_limit": 'too long' in param_value.lower() or 'token' in param_value.lower(),
+                                                "bedrock_service": 'BedrockRuntime' in param_value,
+                                                "is_service_layer_limit": is_bedrock_service_limit,
+                                                "detected_token_limit": detected_token_limit,
+                                                "error_source": "bedrock_service" if is_bedrock_service_limit else "bedrock_model"
+                                            }
+                                            break
                                 else:
                                     full_errors.append({"raw": str(e)})
                         
-                        # Capture full API response structure
+                        # Estimate token counts (rough: 1 token ≈ 4 characters)
+                        payload_json_str = json.dumps(payload)
+                        estimated_tokens = {
+                            "question_tokens": len(sanitized_question) // 4,
+                            "payload_tokens": len(payload_json_str) // 4,
+                            "total_request_tokens_estimate": len(payload_json_str) // 4,
+                            "question_chars": len(sanitized_question),
+                            "payload_chars": len(payload_json_str)
+                        }
+                        
+                        # Capture full API response structure (Generations API format)
                         full_response_structure = {
-                            "isSuccess": result[0].get('isSuccess', False) if result and len(result) > 0 else None,
-                            "outputValues": result[0].get('outputValues', {}) if result and len(result) > 0 else {},
+                            "generations": result.get("generations", []),
                             "errors": full_errors,
-                            "result_length": len(result) if result else 0
+                            "result_keys": list(result.keys()) if result else [],
+                            "response_text_length": len(response.text) if hasattr(response, 'text') else 0
                         }
                         
                         # Capture request context
@@ -559,24 +607,25 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                             "prompt_name": prompt_name,
                             "question_preview": question[:200] if question else "",
                             "question_length": len(question) if question else 0,
-                            "model": current_model,
-                            "url": url
+                            "model": "template_default",
+                            "url": url,
+                            "token_estimates": estimated_tokens,
+                            "bedrock_error_details": bedrock_error_details
                         }
                         
                         # #region agent log - Enhanced ValidationException logging
                         payload_validation_exception = {
                             "runId": effective_run_id,
-                            "model": current_model,
+                            "model": "template_default",
                             "attempt": attempt,
-                            "model_idx": model_idx,
                             "status_code": response.status_code,
-                            "error_msg": error_msg,  # Full error message, not truncated
+                            "error_msg": error_msg,
                             "is_validation_exception": True,
                             "effective_max_retries": effective_max_retries,
                             "full_errors": full_errors,
                             "full_response_structure": full_response_structure,
                             "request_context": request_context,
-                            "complete_result": result  # Full result object for deep inspection
+                            "complete_result": result
                         }
                         _agent_log("H3", "salesforce_api.py:invoke_prompt:validation_exception", "validation_exception_full_details", payload_validation_exception)
                         _agent_log_stdout({
@@ -594,8 +643,24 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         log_print(f"      ❌ ValidationException DETAILS:")
                         log_print(f"         Question: {question[:100]}...")
                         log_print(f"         Prompt: {prompt_name}")
-                        log_print(f"         Model: {current_model}")
+                        log_print(f"         Model: template_default")
                         log_print(f"         Full Error Message: {error_msg}")
+                        log_print(f"         📊 Token Estimates: Question={estimated_tokens['question_tokens']} tokens ({estimated_tokens['question_chars']} chars), Payload={estimated_tokens['payload_tokens']} tokens ({estimated_tokens['payload_chars']} chars)")
+                        if bedrock_error_details:
+                            log_print(f"         🔴 BEDROCK TOKEN LIMIT ERROR DETECTED:")
+                            log_print(f"            Parameter: {bedrock_error_details['parameter_name']}")
+                            log_print(f"            Bedrock Error: {bedrock_error_details['bedrock_error'][:300]}...")
+                            log_print(f"            Contains Token Limit: {bedrock_error_details['contains_token_limit']}")
+                            log_print(f"            ⚠️  ERROR SOURCE: {bedrock_error_details.get('error_source', 'unknown').upper()}")
+                            if bedrock_error_details.get('is_service_layer_limit'):
+                                log_print(f"            🚨 THIS IS A BEDROCK SERVICE LAYER LIMIT (not model limit)!")
+                                log_print(f"            💡 Bedrock service may have stricter limits than the model itself")
+                                log_print(f"            💡 On-demand throughput typically limits to ~65K tokens even if model supports more")
+                            if bedrock_error_details.get('detected_token_limit'):
+                                log_print(f"            📊 Detected Token Limit: {bedrock_error_details['detected_token_limit']:,} tokens")
+                                log_print(f"            📊 Our Request Estimate: {estimated_tokens['total_request_tokens_estimate']:,} tokens")
+                                if estimated_tokens['total_request_tokens_estimate'] > bedrock_error_details['detected_token_limit']:
+                                    log_print(f"            ❌ REQUEST EXCEEDS DETECTED LIMIT by {estimated_tokens['total_request_tokens_estimate'] - bedrock_error_details['detected_token_limit']:,} tokens")
                         if full_errors:
                             for idx, err in enumerate(full_errors):
                                 log_print(f"         Error {idx+1}: {json.dumps(err, indent=10)}")
@@ -603,15 +668,14 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                     # #region agent log - Standard error logging (for non-ValidationException errors)
                     payload_err200 = {
                         "runId": effective_run_id,
-                        "model": current_model,
+                        "model": "template_default",
                         "attempt": attempt,
-                        "model_idx": model_idx,
                         "status_code": response.status_code,
                         "error_msg": error_msg[:200],
                         "is_validation_exception": is_validation_exception,
                         "effective_max_retries": effective_max_retries,
                     }
-                    if not is_validation_exception:  # Only log standard format for non-ValidationException
+                    if not is_validation_exception:
                         _agent_log("H2", "salesforce_api.py:invoke_prompt:error200", "invoke_prompt_error_200", payload_err200)
                         _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H2", "location": "salesforce_api.py:invoke_prompt:error200", "message": "invoke_prompt_error_200", "data": payload_err200, "timestamp": int(_time_for_agent_log.time() * 1000)})
                     # #endregion
@@ -627,10 +691,8 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                             wait_time = 1.0 * (2 ** attempt)
                             time.sleep(wait_time)
                             continue
-                        elif model_idx < len(models_to_try) - 1:
-                            break
                         else:
-                            return (f"Error: Provider rate limit on all models - {error_msg[:200]}", current_model)
+                            return (f"Error: Provider rate limit - {error_msg[:200]}", "template_default")
                     if is_org_rate_limit and attempt < effective_max_retries - 1:
                         reset_match = re.search(r'reset=(\\d+)', error_msg)
                         if reset_match:
@@ -646,19 +708,27 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         log_print(f"      ⏳ ValidationException retry {attempt + 1}/{effective_max_retries} (waiting {wait_time}s)...")
                         time.sleep(wait_time)
                         continue
-                    if is_validation_exception and attempt >= effective_max_retries - 1:
-                        break  # try next model after exhausting retries
                     
-                    return (f"Error: {error_msg[:200]}", current_model)
-                else:  # response.status_code != 200
-                    errors = result[0].get('errors', []) if result and len(result) > 0 else []
-                    error_messages = []
-                    for e in errors:
-                        if isinstance(e, dict):
-                            error_messages.append(e.get('message') or str(e))
+                    return (f"Error: {error_msg[:200]}", "template_default")
+                else:  # response.status_code not in [200, 201]
+                    # Generations API error handling for non-200/201 status codes
+                    error_msg = f"HTTP {response.status_code}"
+                    if result:
+                        if "errors" in result:
+                            error_messages = []
+                            for e in result["errors"]:
+                                if isinstance(e, dict):
+                                    error_messages.append(e.get('message') or str(e))
+                                else:
+                                    error_messages.append(str(e))
+                            error_msg = ', '.join(error_messages) if error_messages else error_msg
+                        elif "message" in result:
+                            error_msg = result["message"]
                         else:
-                            error_messages.append(str(e))
-                    error_msg = ', '.join(error_messages) if error_messages else 'Unknown error'
+                            error_msg = response.text[:500] if hasattr(response, 'text') else error_msg
+                    else:
+                        error_msg = response.text[:500] if hasattr(response, 'text') else error_msg
+                    
                     error_msg_lower = error_msg.lower()
                     
                     # Check for ValidationException - use 5 retries for this specific error
@@ -667,30 +737,29 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         effective_max_retries = 5
                         log_print(f"      🔄 ValidationException detected - increasing retries to 5")
                     
-                    # Enhanced logging for ValidationException (non-200 status) - capture full error details
+                    # Enhanced logging for ValidationException (non-200/201 status) - capture full error details
                     if is_validation_exception:
                         # Capture full error objects (not just messages)
                         full_errors = []
-                        if errors:
-                            for e in errors:
+                        if result and "errors" in result:
+                            for e in result["errors"]:
                                 if isinstance(e, dict):
                                     full_errors.append({
                                         "message": e.get('message', ''),
                                         "statusCode": e.get('statusCode', ''),
                                         "errorCode": e.get('errorCode', ''),
                                         "fields": e.get('fields', []),
-                                        "full_error": e  # Capture entire error object
+                                        "full_error": e
                                     })
                                 else:
                                     full_errors.append({"raw": str(e)})
                         
                         # Capture full API response structure
                         full_response_structure = {
-                            "isSuccess": result[0].get('isSuccess', False) if result and len(result) > 0 else None,
-                            "outputValues": result[0].get('outputValues', {}) if result and len(result) > 0 else {},
+                            "generations": result.get("generations", []) if result else [],
                             "errors": full_errors,
-                            "result_length": len(result) if result else 0,
-                            "response_text": response.text[:1000] if hasattr(response, 'text') and response.text else None,  # Capture raw response text
+                            "result_keys": list(result.keys()) if result else [],
+                            "response_text": response.text[:1000] if hasattr(response, 'text') and response.text else None,
                             "response_headers": dict(response.headers) if hasattr(response, 'headers') else None
                         }
                         
@@ -699,24 +768,23 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                             "prompt_name": prompt_name,
                             "question_preview": question[:200] if question else "",
                             "question_length": len(question) if question else 0,
-                            "model": current_model,
+                            "model": "template_default",
                             "url": url
                         }
                         
-                        # #region agent log - Enhanced ValidationException logging (non-200)
+                        # #region agent log - Enhanced ValidationException logging (non-200/201)
                         payload_validation_exception = {
                             "runId": effective_run_id,
-                            "model": current_model,
+                            "model": "template_default",
                             "attempt": attempt,
-                            "model_idx": model_idx,
                             "status_code": response.status_code,
-                            "error_msg": error_msg,  # Full error message, not truncated
+                            "error_msg": error_msg,
                             "is_validation_exception": True,
                             "effective_max_retries": effective_max_retries,
                             "full_errors": full_errors,
                             "full_response_structure": full_response_structure,
                             "request_context": request_context,
-                            "complete_result": result  # Full result object for deep inspection
+                            "complete_result": result
                         }
                         _agent_log("H3", "salesforce_api.py:invoke_prompt:validation_exception_non200", "validation_exception_full_details_non200", payload_validation_exception)
                         _agent_log_stdout({
@@ -734,24 +802,23 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         log_print(f"      ❌ ValidationException DETAILS (HTTP {response.status_code}):")
                         log_print(f"         Question: {question[:100]}...")
                         log_print(f"         Prompt: {prompt_name}")
-                        log_print(f"         Model: {current_model}")
+                        log_print(f"         Model: template_default")
                         log_print(f"         Full Error Message: {error_msg}")
                         if full_errors:
                             for idx, err in enumerate(full_errors):
                                 log_print(f"         Error {idx+1}: {json.dumps(err, indent=10)}")
                     
-                    # #region agent log - Standard error logging (for non-ValidationException errors, non-200)
+                    # #region agent log - Standard error logging (for non-ValidationException errors, non-200/201)
                     payload_err_non200 = {
                         "runId": effective_run_id,
-                        "model": current_model,
+                        "model": "template_default",
                         "attempt": attempt,
-                        "model_idx": model_idx,
                         "status_code": response.status_code,
                         "error_msg": error_msg[:200],
                         "is_validation_exception": is_validation_exception,
                         "effective_max_retries": effective_max_retries,
                     }
-                    if not is_validation_exception:  # Only log standard format for non-ValidationException
+                    if not is_validation_exception:
                         _agent_log("H3", "salesforce_api.py:invoke_prompt:errorNon200", "invoke_prompt_error_non200", payload_err_non200)
                         _agent_log_stdout({"sessionId": "debug-session", "runId": "unknown", "hypothesisId": "H3", "location": "salesforce_api.py:invoke_prompt:errorNon200", "message": "invoke_prompt_error_non200", "data": payload_err_non200, "timestamp": int(_time_for_agent_log.time() * 1000)})
                     # #endregion
@@ -767,10 +834,8 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                             wait_time = 1.0 * (2 ** attempt)
                             time.sleep(wait_time)
                             continue
-                        elif model_idx < len(models_to_try) - 1:
-                            break
                         else:
-                            return (f"API Error: {response.status_code}, Provider rate limit on all models - {error_msg[:200]}", current_model)
+                            return (f"API Error: {response.status_code}, Provider rate limit - {error_msg[:200]}", "template_default")
                     if is_org_rate_limit and attempt < effective_max_retries - 1:
                         reset_match = re.search(r'reset=(\\d+)', error_msg)
                         if reset_match:
@@ -786,19 +851,17 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         log_print(f"      ⏳ ValidationException retry {attempt + 1}/{effective_max_retries} (waiting {wait_time}s)...")
                         time.sleep(wait_time)
                         continue
-                    if is_validation_exception and attempt >= effective_max_retries - 1:
-                        break  # try next model after exhausting retries
                     
-                    return (f"API Error: {response.status_code}, {error_msg[:200]}", current_model)
+                    return (f"API Error: {response.status_code}, {error_msg[:200]}", "template_default")
             except requests.exceptions.RequestException as e:
                 if attempt < effective_max_retries - 1:
                     wait_time = 1.0 * (2 ** attempt)
                     time.sleep(wait_time)
                     continue
                 else:
-                    return (f"Error: Request failed after retries - {str(e)[:200]}", current_model)
-        continue
-    return ("Error: All models exhausted or failed", models_to_try[-1] if models_to_try else "Unknown")
+                    return (f"Error: Request failed after retries - {str(e)[:200]}", "template_default")
+    
+    return ("Error: All retries exhausted", "template_default")
 
 
 # ============================================================================
