@@ -258,10 +258,11 @@ prompt-optimization-solution/
    - Authentication (username/password login)
    - Returns session token for REST API calls
 
-2. **REST API - Prompt Invocation** (`/services/data/v65.0/actions/custom/generatePromptResponse/{promptName}`)
-   - Invokes Prompt Builder templates with questions
+2. **REST API - Prompt Invocation** (`/services/data/v65.0/einstein/prompt-templates/{templateApiName}/generations`)
+   - Invokes Prompt Builder templates with questions using the Generations API
    - Returns AI-generated responses
-   - Supports model fallback and retry logic
+   - Uses the template's configured primary model
+   - Supports retry logic for transient errors
 
 3. **REST API - Metadata Retrieval** (`/services/data/v65.0/tooling/query/`)
    - Queries Prompt Builder template metadata

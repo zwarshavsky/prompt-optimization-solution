@@ -78,3 +78,5 @@ inputs/*.txt
 temp/
 
 
+scripts/python/memory_test/test_index_update_memory.py
+scripts/python/test_fixes.py
