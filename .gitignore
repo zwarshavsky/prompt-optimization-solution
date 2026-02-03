@@ -77,6 +77,10 @@ inputs/*.txt
 # Temporary testing and development files
 temp/
 
+# Proposed/sensitive input variants (use prompt_optimization_input.yaml.template)
+inputs/prompt_optimization_input_proposed.yaml
+inputs/*_proposed*.yaml
+
 
 scripts/python/memory_test/test_index_update_memory.py
 scripts/python/test_fixes.py
