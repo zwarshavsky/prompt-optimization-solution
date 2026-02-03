@@ -743,6 +743,3 @@ Heroku dynos restart at least once every 24 hours. Long-running jobs (hours) nee
 - [Heroku Postgres](https://devcenter.heroku.com/articles/heroku-postgresql)
 - [Playwright Documentation](https://playwright.dev/python/)
 
-## License
-
-[Add your license information here]
