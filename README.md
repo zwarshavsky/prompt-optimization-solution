@@ -1,3 +1,6 @@
+<img width="1024" height="572" alt="image" src="https://github.com/user-attachments/assets/014767de-4370-44d9-80fa-eb19750a482a" />
+
+
 # Prompt Optimization Solution
 
 An automated RAG (Retrieval-Augmented Generation) optimization system that iteratively improves LLM parser prompts for Salesforce Data Cloud Search Indexes using AI-driven analysis and testing.
