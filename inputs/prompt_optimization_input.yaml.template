@@ -50,8 +50,18 @@ configuration:
   # This must match the exact DeveloperName with underscores (e.g., "Test_RAG_Optimization_SFR_v1")
   # Do NOT use the display name with spaces - use the actual API name/DeveloperName
   promptTemplateApiName: "YOUR_PROMPT_TEMPLATE_API_NAME"
-  # Search Index ID: The Salesforce record ID of the Data Cloud Search Index that contains the LLM parser prompt to be updated (e.g., "18lHu000000CgkHIAS")
+  # Optional - Multi-input prompts: If your Prompt Builder template has more than one input (e.g. Product + Question),
+  # list them here so Excel output and run tabs show one column per input. Omit for single-input (Question only).
+  # promptInputs:
+  #   - apiName: "Input:Product"
+  #     displayName: "Product"
+  #   - apiName: "Input:Question"
+  #     displayName: "Question"
+  # Cycle 1 baseline - required for initial Gemini scoring:
+  # Search Index ID: Data Cloud Search Index record ID (contains LLM parser prompt we fetch for analysis)
   searchIndexId: "YOUR_SEARCH_INDEX_ID"
+  # Retriever API Name: Full API name with _1Cx_ hash, used by prompt template (e.g., "RagFileUDMO_LLM_Parse_SFR_V13_Retriever_2026_02_26_143250_1Cx_GxHcd96dc32")
+  retrieverApiName: "YOUR_RETRIEVER_API_NAME"
   # Refinement stage: "llm_parser" (optimize LLM parser prompt), "response_prompt" (optimize response prompt template), or "agentforce_agent" (optimize Agentforce agent)
   refinementStage: "llm_parser"  # Options: "llm_parser", "response_prompt", or "agentforce_agent"
   

@@ -64,8 +64,9 @@ A properly configured `prompt_optimization_input.yaml` file containing:
 - **Test Questions and Ground Truth**:
   - `questions` - Array of test questions with:
     - `number` - Question identifier (e.g., `"Q1"`)
-    - `text` - The test question text
+    - `text` - The test question text (single-input prompts; use alone or with `inputs` for `Input:Question`)
     - `expectedAnswer` - The target/ground truth answer
+  - **Multi-input prompts (optional):** If your Prompt Builder template has multiple inputs (e.g. Product + Question), add `promptInputs` under configuration (list of `apiName` + `displayName`) and per-question `inputs` (map of input API name to value). See Configuration section for an example.
 
 - **Refinement Stage Configuration**:
   - `refinementStages.llm_parser` - Instructions for Gemini on how to analyze and optimize
@@ -89,7 +90,7 @@ A properly configured `prompt_optimization_input.yaml` file containing:
   2. Compare the generated answer to the expected answer
   3. Use Gemini to analyze failures and propose improvements
 
-**Example:**
+**Example (single-input):**
 ```yaml
 questions:
   - number: "Q1"
@@ -97,6 +98,23 @@ questions:
     expectedAnswer: |
       - 4x chassis: 10 Thermal Magnetic breakers twin mounted
       - 5x chassis: 14 Thermal Magnetic breakers twin mounted
+```
+
+**Example (multi-input prompt – Product + Question):**  
+Add `promptInputs` under configuration and use per-question `inputs`:
+```yaml
+configuration:
+  promptInputs:
+    - apiName: "Input:Product"
+      displayName: "Product"
+    - apiName: "Input:Question"
+      displayName: "Question"
+questions:
+  - number: "Q1"
+    inputs:
+      Input:Product: "RiteHite Troubleshooting Manual"
+      Input:Question: "How many breakers fit in a 400A section?"
+    expectedAnswer: "..."
 ```
 
 ### 5. Google Gemini API Key
@@ -704,6 +722,19 @@ Heroku dynos restart at least once every 24 hours. Long-running jobs (hours) nee
 - Ensure `.profile` script installs browsers on startup
 - Check Heroku logs for browser installation messages
 - Verify `playwright install chromium` runs successfully
+
+### Optional: Skip "Verify Your Identity" for Heroku automation user
+
+When the workflow runs on Heroku, Playwright logs in as a Salesforce user. If Salesforce shows the **Verify Your Identity** (email code) screen, no one is there to complete it, so the run can get stuck. To avoid that, the Salesforce user the Heroku app uses can be granted the system permission **Skip Device Activation at Login** via a permission set (you cannot edit the Partner User profile directly).
+
+**Steps**
+
+1. **Setup** → **Permission Sets** → **New**
+2. Name the permission set (e.g. "Skip device activation for Heroku automation")
+3. Open it → **System Permissions** → **Edit** → enable **Skip Device Activation at Login** → **Save**
+4. **Manage Assignments** → **Add Assignments** → select the user the Heroku app uses → **Assign**
+
+**Disclaimer:** Granting this permission reduces identity verification for that user (no device/email step at login). Use it only for the dedicated automation/service account used by the Heroku app. Do not assign it to regular end users. Restrict and monitor who has access to that automation user's credentials.
 
 ## Future Enhancements
 

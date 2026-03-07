@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Any
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import time as _time_for_agent_log
-from worker_utils import get_db_connection
+from worker_utils import get_db_connection, check_run_aborted
 
 # Helper function for immediate output flushing
 def log_print(*args, **kwargs):
@@ -266,19 +266,33 @@ def sanitize_question(question: str) -> str:
     return sanitized
 
 
-def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries=3, model_used=None, models_list=None, run_id=None):
+def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries=3, model_used=None, models_list=None, run_id=None, input_value_map=None):
     """Invoke prompt template via Generations REST API with retry logic and logging.
-    
+
+    Supports single-input (question -> Input:Question) or multi-input via input_value_map.
+
+    Args:
+        instance_url: Salesforce instance URL.
+        access_token: Auth token.
+        question: Single question text for single-input prompts (used when input_value_map is None).
+        prompt_name: Prompt template DeveloperName.
+        input_value_map: Optional dict of input API name -> value (e.g. {"Input:Product": "...", "Input:Question": "..."}).
+                         When provided, valueMap is built from this; question is ignored.
+        max_retries: Max retries. model_used, models_list, run_id: as before.
+
     Note: ValidationException errors automatically get 5 retries instead of the default max_retries.
-    Uses the Generations API endpoint which supports more control over prompt invocation.
     """
+    if input_value_map is None or len(input_value_map) == 0:
+        if question is None:
+            raise ValueError("invoke_prompt: either question or input_value_map must be provided")
+        input_value_map = {"Input:Question": question}
+
     # #region agent log
     effective_run_id = run_id or "unknown"
     payload_init = {
         "runId": effective_run_id,
         "prompt_name": prompt_name,
-        "question_len": len(question) if question else 0,
-        "question_preview": (question[:120] + "…") if question and len(question) > 120 else question,
+        "input_keys": list(input_value_map.keys()),
         "hypothesis": "H5: Token limit exceeded due to LLM parser prompt optimization creating larger chunks over cycles"
     }
     _agent_log("H5", "salesforce_api.py:invoke_prompt:init", "invoke_prompt_start", payload_init)
@@ -286,18 +300,11 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
     # #endregion
 
     session = requests.Session()
-    
-    # TEMPORARILY DISABLE SANITIZATION TO TEST IF IT'S CAUSING ISSUES
-    # Sanitize question before sending to API to prevent ValidationException errors
-    # sanitized_question = sanitize_question(question)
-    sanitized_question = question  # Use original question without sanitization
-    
-    # Log what we're actually sending (for debugging)
-    # if sanitized_question != question:
-    #     log_print(f"      🔧 Question was sanitized (original: {len(question)} chars, sanitized: {len(sanitized_question)} chars)")
-    # else:
-    #     log_print(f"      ✓ Question passed sanitization unchanged ({len(question)} chars)")
-    log_print(f"      📤 Sending question (no sanitization): '{question[:100]}...' ({len(question)} chars)")
+
+    # Build valueMap: each key -> {"value": str(value)}
+    value_map = {k: {"value": str(v)} for k, v in input_value_map.items()}
+    preview = list(value_map.keys())
+    log_print(f"      📤 Sending inputs: {preview}")
     
     # AUTHENTICATION CHECK: Verify token is valid before making API calls
     # If token is invalid/expired, ValidationException can occur
@@ -339,15 +346,11 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
     url = f"{instance_url}/services/data/v65.0/einstein/prompt-templates/{prompt_name}/generations"
     headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
     
-    # Build Generations API payload structure
+    # Build Generations API payload structure (single- or multi-input)
     payload = {
         "isPreview": False,
         "inputParams": {
-            "valueMap": {
-                "Input:Question": {
-                    "value": sanitized_question
-                }
-            }
+            "valueMap": value_map
         },
         "additionalConfig": {
             "applicationName": "PromptTemplateGenerationsInvocable",
@@ -367,7 +370,8 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
     # Split into lines and log each (to avoid truncation)
     for line in payload_str.split('\n'):
         log_print(f"         {line}")
-    log_print(f"      📝 Question in payload: '{sanitized_question[:100]}...' ({len(sanitized_question)} chars)")
+    total_input_chars = sum(len(str(v)) for v in input_value_map.values())
+    log_print(f"      📝 Inputs in payload: {list(input_value_map.keys())} ({total_input_chars} chars total)")
     
     # Start with default retries, but will increase to 5 if ValidationException is detected
     effective_max_retries = max_retries
@@ -430,7 +434,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                 log_print(f"      ⏳ Retry attempt {attempt + 1}/{effective_max_retries}...")
             attempt += 1
             try:
-                response = session.post(url, headers=headers, json=payload, timeout=60)
+                response = session.post(url, headers=headers, json=payload, timeout=120)  # 2 min (matches temp/run_15_questions_async)
                 
                 # Check for authentication errors (401 Unauthorized, 403 Forbidden)
                 if response.status_code == 401:
@@ -586,11 +590,12 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         
                         # Estimate token counts (rough: 1 token ≈ 4 characters)
                         payload_json_str = json.dumps(payload)
+                        _input_chars = sum(len(str(v)) for v in input_value_map.values())
                         estimated_tokens = {
-                            "question_tokens": len(sanitized_question) // 4,
+                            "question_tokens": _input_chars // 4,
                             "payload_tokens": len(payload_json_str) // 4,
                             "total_request_tokens_estimate": len(payload_json_str) // 4,
-                            "question_chars": len(sanitized_question),
+                            "question_chars": _input_chars,
                             "payload_chars": len(payload_json_str)
                         }
                         
@@ -603,10 +608,11 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         }
                         
                         # Capture request context
+                        _first_val = next(iter(input_value_map.values()), "")
                         request_context = {
                             "prompt_name": prompt_name,
-                            "question_preview": question[:200] if question else "",
-                            "question_length": len(question) if question else 0,
+                            "question_preview": str(_first_val)[:200] if _first_val else "",
+                            "question_length": _input_chars,
                             "model": "template_default",
                             "url": url,
                             "token_estimates": estimated_tokens,
@@ -641,7 +647,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         
                         # Also log to console for immediate visibility
                         log_print(f"      ❌ ValidationException DETAILS:")
-                        log_print(f"         Question: {question[:100]}...")
+                        log_print(f"         Inputs: {list(input_value_map.keys())} (preview: {str(_first_val)[:100]}...)")
                         log_print(f"         Prompt: {prompt_name}")
                         log_print(f"         Model: template_default")
                         log_print(f"         Full Error Message: {error_msg}")
@@ -764,10 +770,12 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         }
                         
                         # Capture request context
+                        _input_chars_2 = sum(len(str(v)) for v in input_value_map.values())
+                        _first_val_2 = next(iter(input_value_map.values()), "")
                         request_context = {
                             "prompt_name": prompt_name,
-                            "question_preview": question[:200] if question else "",
-                            "question_length": len(question) if question else 0,
+                            "question_preview": str(_first_val_2)[:200] if _first_val_2 else "",
+                            "question_length": _input_chars_2,
                             "model": "template_default",
                             "url": url
                         }
@@ -800,7 +808,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                         
                         # Also log to console for immediate visibility
                         log_print(f"      ❌ ValidationException DETAILS (HTTP {response.status_code}):")
-                        log_print(f"         Question: {question[:100]}...")
+                        log_print(f"         Inputs: {list(input_value_map.keys())} (preview: {str(_first_val_2)[:100]}...)")
                         log_print(f"         Prompt: {prompt_name}")
                         log_print(f"         Model: template_default")
                         log_print(f"         Full Error Message: {error_msg}")
@@ -984,6 +992,337 @@ class SearchIndexAPI:
         return self.create_index(payload)
 
 
+def get_next_index_name(instance_url: str, access_token: str, base_name: str = "RagFileUDMO_LLM_Parse_SFR_V") -> str:
+    """Return next V{n} name from API. If no V* indexes exist, starts with V2."""
+    try:
+        api = SearchIndexAPI(instance_url, access_token)
+        details = api.list_indexes().get("semanticSearchDefinitionDetails") or []
+        pattern = re.compile(r"RagFileUDMO_LLM_Parse_SFR_V(\d+)", re.I)
+        versions = []
+        for d in details:
+            name = d.get("developerName") or d.get("label") or ""
+            m = pattern.search(name)
+            if m:
+                versions.append(int(m.group(1)))
+        next_v = max(versions) + 1 if versions else 2
+        return f"RagFileUDMO_LLM_Parse_SFR_V{next_v}"
+    except Exception as e:
+        log_print(f"   ⚠️ Could not list indexes for name: {e}")
+        return "RagFileUDMO_LLM_Parse_SFR_V2"
+
+
+def find_index_id_by_name(
+    instance_url: str,
+    access_token: str,
+    index_name: str,
+    max_attempts: int = 3,
+    retry_delay_seconds: int = 5,
+) -> Optional[str]:
+    """Get index ID from Search Index API by developerName/label. Retries for eventual consistency after UI create."""
+    base = (index_name or "").strip()
+    base_upper = base.upper()
+    for attempt in range(max_attempts):
+        try:
+            if attempt > 0:
+                time.sleep(retry_delay_seconds)
+            api = SearchIndexAPI(instance_url, access_token)
+            raw = api.list_indexes()
+            details = raw.get("semanticSearchDefinitionDetails") or []
+            for d in details:
+                dev = (d.get("developerName") or "").strip()
+                label = (d.get("label") or "").strip()
+                idx_id = d.get("id") or d.get("semanticSearchDefinitionId")
+                if not idx_id:
+                    continue
+                if dev.upper() == base_upper or label.upper() == base_upper:
+                    return idx_id
+                if base_upper in dev.upper() or base_upper in label.upper():
+                    return idx_id
+            if attempt < max_attempts - 1:
+                log_print(f"   Index not in list yet (attempt {attempt + 1}/{max_attempts}); retrying in {retry_delay_seconds}s...")
+        except Exception as e:
+            log_print(f"   ⚠️ Lookup attempt {attempt + 1}: {e}")
+    return None
+
+
+# ============================================================================
+# Retrievers API
+# ============================================================================
+
+SSOT_RETRIEVERS_PATH = "/services/data/v65.0/ssot/machine-learning/retrievers"
+_VALID_RETRIEVER_HASH_PATTERN = re.compile(r"_1Cx_[A-Za-z0-9]+$")
+
+
+def get_retrievers(instance_url: str, access_token: str) -> List[Dict[str, Any]]:
+    """GET ssot/machine-learning/retrievers. Returns list of retriever objects."""
+    url = f"{instance_url.rstrip('/')}{SSOT_RETRIEVERS_PATH}?limit=100"
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    resp = requests.get(url, headers=headers, timeout=60)
+    resp.raise_for_status()
+    data = resp.json() if resp.text else {}
+    if isinstance(data, list):
+        return data
+    for key in ("retrievers", "details", "retrieverDetails", "records", "result"):
+        if isinstance(data.get(key), list):
+            return data[key]
+    return []
+
+
+def find_retriever_api_name(retrievers: List[Dict], display_name: str) -> tuple:
+    """Find retriever whose label matches display_name. Returns (api_name, label) or (None, None)."""
+    display_clean = (display_name or "").strip()
+    norm = display_clean.replace(" ", "_").replace("-", "_")
+    for r in retrievers:
+        if not isinstance(r, dict):
+            continue
+        api_name = (r.get("name") or "").strip()
+        label = (r.get("label") or "").strip()
+        if not api_name or not _VALID_RETRIEVER_HASH_PATTERN.search(api_name):
+            continue
+        if display_clean == label or norm in api_name.replace(" ", "_") or display_clean in (label or ""):
+            return (api_name, label or display_clean)
+    return (None, None)
+
+
+def poll_index_until_ready(
+    index_id: str,
+    instance_url: str,
+    access_token: str,
+    timeout_seconds: int = 7200,  # 2 hours (runs can take ~1hr 6m)
+    poll_interval: int = 10,
+    run_id: Optional[str] = None,
+) -> bool:
+    """Poll Search Index REST API until runtimeStatus is Active/Ready and indexRefreshedOn is set.
+    When run_id is provided, checks check_run_aborted each iteration and returns False if aborted."""
+    api_url = f"{instance_url.rstrip('/')}/services/data/v65.0/ssot/search-index/{index_id}"
+    start = time.time()
+    attempt = 0
+
+    while True:
+        if run_id and check_run_aborted(run_id):
+            log_print(f"   ❌ Run aborted during index poll (index_id={index_id})")
+            return False
+
+        elapsed = time.time() - start
+        if elapsed > timeout_seconds:
+            log_print(f"   ⏱️ Timeout after {timeout_seconds}s waiting for index Ready")
+            return False
+
+        try:
+            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            resp = requests.get(api_url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            data = resp.json() if resp.text else {}
+        except Exception as e:
+            log_print(f"   ⚠️ Poll error (attempt {attempt + 1}): {e}")
+            time.sleep(poll_interval)
+            attempt += 1
+            continue
+
+        runtime_status = data.get("runtimeStatus", "")
+        index_refreshed_on = data.get("indexRefreshedOn")
+        attempt += 1
+
+        if runtime_status and runtime_status.upper() in ("ACTIVE", "READY"):
+            if index_refreshed_on:
+                log_print(f"   ✅ Index Ready. Status: {runtime_status}, indexRefreshedOn: {index_refreshed_on}")
+                return True
+            if attempt % 12 == 0:
+                log_print(f"   ⏳ Status: {runtime_status} but indexRefreshedOn null (attempt {attempt})...")
+        elif runtime_status and "FAILED" in runtime_status.upper():
+            log_print(f"   ❌ Index build failed: {runtime_status}")
+            if data.get("errorMessage"):
+                log_print(f"   Error: {data['errorMessage']}")
+            return False
+        else:
+            if attempt % 6 == 0:
+                log_print(f"   ⏳ Status: {runtime_status} (attempt {attempt})...")
+
+        time.sleep(poll_interval)
+
+
+def poll_retriever_until_activated(
+    instance_url: str,
+    access_token: str,
+    retriever_display_name: str,
+    timeout_seconds: int = 600,
+    poll_interval: int = 10,
+    run_id: Optional[str] = None,
+) -> tuple:
+    """Poll until retriever is found and active. Returns (api_name, label) or (None, None)."""
+    start = time.time()
+    attempt = 0
+
+    while True:
+        if run_id and check_run_aborted(run_id):
+            log_print(f"   ❌ Run aborted during retriever poll")
+            return (None, None)
+
+        elapsed = time.time() - start
+        if elapsed > timeout_seconds:
+            log_print(f"   ⏱️ Timeout waiting for retriever activation")
+            return (None, None)
+
+        try:
+            retrievers = get_retrievers(instance_url, access_token)
+            api_name, label = find_retriever_api_name(retrievers, retriever_display_name)
+            if api_name:
+                r = next((x for x in retrievers if (x.get("name") or "").strip() == api_name), None)
+                if r and (r.get("activeConfiguration") or {}).get("isActive"):
+                    log_print(f"   ✅ Retriever activated: {api_name}")
+                    return (api_name, label or retriever_display_name)
+            if attempt % 3 == 0:
+                log_print(f"   ⏳ Waiting for retriever activation...")
+        except Exception as e:
+            log_print(f"   ⚠️ Retriever poll failed: {e}")
+
+        attempt += 1
+        time.sleep(poll_interval)
+
+
+def update_genai_prompt_with_retriever(
+    instance_url: str,
+    access_token: str,
+    prompt_template_api_name: str,
+    retriever_api_name: str,
+    retriever_label: str,
+) -> bool:
+    """Create new prompt template version with retriever reference updated via Metadata API."""
+    METADATA_NS = "http://soap.sforce.com/2006/04/metadata"
+    NS = {"met": METADATA_NS}
+
+    xml_content = retrieve_metadata_via_api(
+        instance_url, access_token, "GenAiPromptTemplate", prompt_template_api_name
+    )
+    if not xml_content or not xml_content.strip():
+        log_print("   ❌ Failed to retrieve prompt template metadata")
+        return False
+
+    root = ET.fromstring(xml_content)
+    records = root[0] if root.tag and "result" in root.tag and len(root) else root
+    template_src = records
+
+    active_el = template_src.find(".//met:activeVersionIdentifier", NS) or template_src.find(".//{http://soap.sforce.com/2006/04/metadata}activeVersionIdentifier")
+    active_id = (active_el.text or "").strip() if active_el is not None and active_el.text else None
+    if not active_id:
+        log_print("   ❌ No active version in template")
+        return False
+
+    versions = template_src.findall(".//met:templateVersions", NS) or template_src.findall(".//{http://soap.sforce.com/2006/04/metadata}templateVersions")
+    if not versions:
+        log_print("   ❌ No template versions found")
+        return False
+
+    max_num = 0
+    base_hash = None
+    for v in versions:
+        vid_el = v.find("met:versionIdentifier", NS) or v.find("{http://soap.sforce.com/2006/04/metadata}versionIdentifier")
+        if vid_el is not None and vid_el.text and "_" in vid_el.text:
+            base, num_str = vid_el.text.rsplit("_", 1)
+            try:
+                n = int(num_str)
+                if n > max_num:
+                    max_num = n
+                    base_hash = base
+            except ValueError:
+                pass
+    new_version_id = f"{base_hash or 'new'}_{max_num + 1}"
+
+    active_version = None
+    for v in versions:
+        vid_el = v.find("met:versionIdentifier", NS) or v.find("{http://soap.sforce.com/2006/04/metadata}versionIdentifier")
+        if vid_el is not None and vid_el.text and vid_el.text.strip() == active_id:
+            active_version = v
+            break
+    if active_version is None:
+        return False
+
+    def deep_copy_el(el):
+        copy_el = ET.Element(el.tag, attrib=dict(el.attrib))
+        copy_el.text = el.text
+        copy_el.tail = el.tail
+        for child in el:
+            copy_el.append(deep_copy_el(child))
+        return copy_el
+
+    new_version = deep_copy_el(active_version)
+    for vid_el in [
+        new_version.find("met:versionIdentifier", NS),
+        new_version.find("{http://soap.sforce.com/2006/04/metadata}versionIdentifier"),
+    ]:
+        if vid_el is not None:
+            vid_el.text = new_version_id
+            break
+
+    tdps = new_version.findall("met:templateDataProviders", NS) or new_version.findall("{http://soap.sforce.com/2006/04/metadata}templateDataProviders")
+    for tdp in tdps:
+        def_el = tdp.find("met:definition", NS) or tdp.find("{http://soap.sforce.com/2006/04/metadata}definition")
+        label_el = tdp.find("met:label", NS) or tdp.find("{http://soap.sforce.com/2006/04/metadata}label")
+        ref_el = tdp.find("met:referenceName", NS) or tdp.find("{http://soap.sforce.com/2006/04/metadata}referenceName")
+        if def_el is not None and "getEinsteinRetrieverResults" in (def_el.text or ""):
+            def_el.text = f"invocable://getEinsteinRetrieverResults/{retriever_api_name}"
+        if label_el is not None:
+            label_el.text = retriever_label
+        if ref_el is not None:
+            ref_el.text = f"EinsteinSearch:{retriever_api_name}"
+
+    content_el = new_version.find("met:content", NS) or new_version.find("{http://soap.sforce.com/2006/04/metadata}content")
+    if content_el is not None and content_el.text:
+        content_el.text = re.sub(
+            r"EinsteinSearch:[A-Za-z0-9_]+\.results",
+            f"EinsteinSearch:{retriever_api_name}.results",
+            content_el.text,
+        )
+
+    wrapper = ET.Element(f"{{{METADATA_NS}}}GenAiPromptTemplate")
+    for child in list(template_src):
+        if "templateVersions" not in (child.tag or ""):
+            wrapper.append(deep_copy_el(child))
+    for v in versions:
+        wrapper.append(deep_copy_el(v))
+    wrapper.append(new_version)
+
+    av_e = wrapper.find(".//met:activeVersionIdentifier", NS) or wrapper.find(".//{http://soap.sforce.com/2006/04/metadata}activeVersionIdentifier")
+    if av_e is not None:
+        av_e.text = new_version_id
+    else:
+        av_new = ET.SubElement(wrapper, f"{{{METADATA_NS}}}activeVersionIdentifier")
+        av_new.text = new_version_id
+
+    modified_xml = ET.tostring(wrapper, encoding="unicode", default_namespace=METADATA_NS)
+
+    soapenv_uri = "http://schemas.xmlsoap.org/soap/envelope/"
+    env = ET.Element(f"{{{soapenv_uri}}}Envelope", attrib={"xmlns:soapenv": soapenv_uri, "xmlns:met": METADATA_NS})
+    header = ET.SubElement(env, f"{{{soapenv_uri}}}Header")
+    session = ET.SubElement(header, f"{{{METADATA_NS}}}SessionHeader")
+    sid = ET.SubElement(session, f"{{{METADATA_NS}}}sessionId")
+    sid.text = access_token
+    body = ET.SubElement(env, f"{{{soapenv_uri}}}Body")
+    xsi_uri = "http://www.w3.org/2001/XMLSchema-instance"
+    um = ET.SubElement(body, f"{{{METADATA_NS}}}updateMetadata")
+    meta_el = ET.SubElement(um, f"{{{METADATA_NS}}}metadata", attrib={f"{{{xsi_uri}}}type": "met:GenAiPromptTemplate"})
+    template_root = ET.fromstring(modified_xml)
+    for child in list(template_root):
+        meta_el.append(child)
+    envelope_bytes = ET.tostring(env, encoding="unicode")
+    soap_url = f"{instance_url.rstrip('/')}/services/Soap/m/65.0"
+    headers = {"Content-Type": "text/xml; charset=UTF-8", "SOAPAction": "updateMetadata"}
+    resp = requests.post(soap_url, data=envelope_bytes, headers=headers, timeout=60)
+    if not resp.ok:
+        log_print(f"   ❌ Metadata API: {resp.status_code} {resp.reason}")
+        return False
+    root_resp = ET.fromstring(resp.text)
+    fault = root_resp.find(f".//{{{soapenv_uri}}}Fault")
+    if fault is not None:
+        fs = fault.find(f".//{{{soapenv_uri}}}faultstring")
+        msg = fs.text if fs is not None else "updateMetadata fault"
+        log_print(f"   ❌ Metadata API fault: {msg}")
+        return False
+
+    log_print(f"   ✅ Prompt template updated with retriever {retriever_api_name}")
+    return True
+
+
 __all__ = [
     "authenticate_soap",
     "get_salesforce_credentials",
@@ -992,6 +1331,13 @@ __all__ = [
     "retrieve_metadata_via_api",
     "resolve_prompt_template_name_from_id",
     "SearchIndexAPI",
+    "get_retrievers",
+    "find_retriever_api_name",
+    "poll_index_until_ready",
+    "poll_retriever_until_activated",
+    "update_genai_prompt_with_retriever",
+    "get_next_index_name",
+    "find_index_id_by_name",
 ]
 
 

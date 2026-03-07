@@ -29,7 +29,7 @@ from salesforce_api import (
     retrieve_metadata_via_api,
     SearchIndexAPI,
 )
-from playwright_scripts import update_search_index_prompt
+from playwright_scripts import update_search_index_prompt, run_new_index_pipeline
 
 # Helper function for immediate output flushing
 def log_print(*args, **kwargs):
@@ -126,6 +126,64 @@ def release_index_lock(search_index_id):
             return False
     return True
 
+
+def check_prompt_template_lock(prompt_template_api_name):
+    """Check if a prompt template is already being processed by another run"""
+    state_dir = get_state_dir()
+    lock_file = state_dir / f"prompt_lock_{prompt_template_api_name}.lock"
+    if not lock_file.exists():
+        return False, None
+    try:
+        with open(lock_file, 'r') as f:
+            lock_data = json.load(f)
+        pid = lock_data.get('pid')
+        run_id = lock_data.get('run_id', 'Unknown')
+        if pid:
+            try:
+                os.kill(pid, 0)
+                return True, f"Prompt template {prompt_template_api_name} is being processed by run {run_id}"
+            except ProcessLookupError:
+                lock_file.unlink()
+                return False, None
+    except Exception:
+        lock_file.unlink()
+        return False, None
+    return False, None
+
+
+def acquire_prompt_template_lock(prompt_template_api_name, run_id):
+    """Acquire lock for a prompt template (for new index/retriever pipeline)"""
+    state_dir = get_state_dir()
+    lock_file = state_dir / f"prompt_lock_{prompt_template_api_name}.lock"
+    is_locked, err = check_prompt_template_lock(prompt_template_api_name)
+    if is_locked:
+        return False, err
+    try:
+        with open(lock_file, 'w') as f:
+            json.dump({
+                'prompt_template_api_name': prompt_template_api_name,
+                'run_id': run_id,
+                'pid': os.getpid(),
+                'timestamp': time.strftime("%Y-%m-%dT%H:%M:%S")
+            }, f, indent=2)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def release_prompt_template_lock(prompt_template_api_name):
+    """Release the lock for a prompt template"""
+    state_dir = get_state_dir()
+    lock_file = state_dir / f"prompt_lock_{prompt_template_api_name}.lock"
+    if lock_file.exists():
+        try:
+            lock_file.unlink()
+            return True
+        except Exception as e:
+            log_print(f"  ⚠️  Warning: Could not remove lock file: {e}")
+            return False
+    return True
+
 def save_state(cycle_number, last_completed_step, sheet_name, refinement_stage,
                stage_status=None, proposed_llm_parser_prompt=None,
                proposed_response_prompt=None, stage_complete_reason=None,
@@ -139,8 +197,13 @@ def save_state(cycle_number, last_completed_step, sheet_name, refinement_stage,
     else:
         state_file = state_dir / "current_state.json"
     
+    # Store instance_url for site-isolation (cannot resume a run from a different org)
+    instance_url = None
+    if yaml_config_snapshot:
+        instance_url = (yaml_config_snapshot.get('configuration') or {}).get('salesforce', {}).get('instanceUrl')
     state = {
         "run_id": run_id,
+        "instance_url": instance_url,
         "cycle_number": cycle_number,
         "last_completed_step": last_completed_step,
         "sheet_name": sheet_name,
@@ -154,8 +217,11 @@ def save_state(cycle_number, last_completed_step, sheet_name, refinement_stage,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")
     }
     
-    # Also save cycle-specific archive (always save, even if run_id is None)
-    archive_file = state_dir / f"cycle_{cycle_number}_state.json"
+    # Also save cycle-specific archive (run-specific when run_id provided)
+    if run_id:
+        archive_file = state_dir / f"run_{run_id}_cycle_{cycle_number}_state.json"
+    else:
+        archive_file = state_dir / f"cycle_{cycle_number}_state.json"
     try:
         with open(archive_file, 'w') as f:
             json.dump(state, f, indent=2)
@@ -169,39 +235,79 @@ def save_state(cycle_number, last_completed_step, sheet_name, refinement_stage,
     
     log_print(f"  💾 State saved: cycle {cycle_number}, step {last_completed_step}")
 
-def load_state(resume_from_step=None, resume_from_cycle=None, run_id=None):
-    """Load workflow state from JSON file"""
+def _get_state_instance_url(state):
+    """Extract instance_url from state (supports legacy state without top-level instance_url)."""
+    url = state.get('instance_url')
+    if not url and state.get('yaml_config_snapshot'):
+        url = (state['yaml_config_snapshot'].get('configuration') or {}).get('salesforce', {}).get('instanceUrl')
+    return (url or '').strip().rstrip('/')
+
+def _sites_match(current_url, state_url):
+    """Compare two instance URLs (normalized) for site equality."""
+    a = (current_url or '').strip().rstrip('/').lower()
+    b = (state_url or '').strip().rstrip('/').lower()
+    return bool(a and b and a == b)
+
+def load_state(resume_from_step=None, resume_from_cycle=None, run_id=None, instance_url=None):
+    """Load workflow state from JSON file. If instance_url is provided, only loads state
+    from the same site; refuses to resume a run from a different org."""
     state_dir = get_state_dir()
-    
+
+    def _load_and_validate(path):
+        if not path or not path.exists():
+            return None
+        try:
+            with open(path, 'r') as f:
+                state = json.load(f)
+            if instance_url:
+                state_url = _get_state_instance_url(state)
+                if not _sites_match(instance_url, state_url):
+                    log_print(f"  ❌ Cannot resume: State is from a different site ({state_url or 'unknown'})")
+                    log_print(f"     Current YAML site: {instance_url}")
+                    return None
+            if resume_from_step and state.get('last_completed_step') != resume_from_step - 1:
+                log_print(f"  ⚠️  Warning: State shows last completed step {state.get('last_completed_step')}, but resuming from step {resume_from_step}")
+            return state
+        except (json.JSONDecodeError, KeyError) as e:
+            log_print(f"  ❌ ERROR: State file is corrupted: {e}")
+            return None
+
     # Determine which state file to load
     if run_id:
         state_file = state_dir / f"run_{run_id}_state.json"
-    elif resume_from_cycle:
-        # Try to find state file with matching cycle
+        return _load_and_validate(state_file)
+    if resume_from_cycle:
         state_file = state_dir / f"cycle_{resume_from_cycle}_state.json"
-    else:
-        # Find latest run state file
-        state_files = list(state_dir.glob('run_*_state.json'))
-        if state_files:
-            state_file = max(state_files, key=lambda p: p.stat().st_mtime)
-        else:
-            state_file = state_dir / "current_state.json"
-    
-    if not state_file.exists():
+        return _load_and_validate(state_file)
+
+    # Find latest run state file (filter by site when instance_url provided)
+    state_files = list(state_dir.glob('run_*_state.json'))
+    if not state_files:
+        if (state_dir / "current_state.json").exists():
+            return _load_and_validate(state_dir / "current_state.json")
         return None
-    
-    try:
-        with open(state_file, 'r') as f:
-            state = json.load(f)
-        
-        # If resuming from specific step, validate it matches
-        if resume_from_step and state.get('last_completed_step') != resume_from_step - 1:
-            log_print(f"  ⚠️  Warning: State shows last completed step {state.get('last_completed_step')}, but resuming from step {resume_from_step}")
-        
-        return state
-    except (json.JSONDecodeError, KeyError) as e:
-        log_print(f"  ❌ ERROR: State file is corrupted: {e}")
+
+    # When instance_url provided, filter to same-site state files only (never use another site's state)
+    candidates = []
+    for p in state_files:
+        try:
+            with open(p, 'r') as f:
+                s = json.load(f)
+            if instance_url:
+                state_url = _get_state_instance_url(s)
+                if not _sites_match(instance_url, state_url):
+                    continue
+            else:
+                # Caller should pass instance_url when resuming; if not, refuse to pick any state
+                continue
+            candidates.append((p.stat().st_mtime, p))
+        except (json.JSONDecodeError, KeyError):
+            continue
+    if not candidates:
+        log_print("  ℹ️  No state files found for this site; cannot resume")
         return None
+    state_file = max(candidates, key=lambda t: t[0])[1]
+    return _load_and_validate(state_file)
 
 def validate_state(state, excel_file):
     """Validate that state is consistent with Excel file"""
@@ -339,8 +445,9 @@ def extract_results_from_sheet(excel_file, sheet_name):
             log_print(f"  ⚠️  Could not find Pass/Fail column in sheet {sheet_name}")
             return None
         
-        # Extract results
+        # Extract results (supports 3-tier scoring: PASS, PARTIAL, FAIL)
         pass_count = 0
+        partial_count = 0
         fail_count = 0
         safety_scores = []
         question_results = []
@@ -354,7 +461,10 @@ def extract_results_from_sheet(excel_file, sheet_name):
         
         for idx, row in data_df.iterrows():
             pf_val = str(row[pf_col]).upper() if pd.notna(row[pf_col]) else ''
-            if 'PASS' in pf_val or '✅' in pf_val:
+            if 'PARTIAL' in pf_val or '🔶' in pf_val:
+                partial_count += 1
+                status = 'PARTIAL'
+            elif 'PASS' in pf_val or '✅' in pf_val:
                 pass_count += 1
                 status = 'PASS'
             elif 'FAIL' in pf_val or '❌' in pf_val:
@@ -381,7 +491,7 @@ def extract_results_from_sheet(excel_file, sheet_name):
                     'status': status
                 })
         
-        total = pass_count + fail_count
+        total = pass_count + partial_count + fail_count
         pass_rate = (pass_count / total * 100) if total > 0 else 0
         avg_safety = sum(safety_scores) / len(safety_scores) if safety_scores else 0
         
@@ -401,6 +511,7 @@ def extract_results_from_sheet(excel_file, sheet_name):
         return {
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'pass_count': pass_count,
+            'partial_count': partial_count,
             'fail_count': fail_count,
             'total': total,
             'pass_rate': pass_rate,
@@ -426,7 +537,7 @@ def extract_results_from_sheet(excel_file, sheet_name):
 # ============================================================================
 
 def analyze_with_gemini(excel_file, sheet_name, pdf_files=None, model_name=None, 
-                        config_dict=None, cycle_number=None):
+                        config_dict=None, cycle_number=None, rejection_context=None):
     """Analyze responses using Gemini Pro API
     
     Args:
@@ -436,6 +547,8 @@ def analyze_with_gemini(excel_file, sheet_name, pdf_files=None, model_name=None,
         model_name: Gemini model name
         config_dict: Frozen YAML config dictionary (REQUIRED)
         cycle_number: Current cycle number (used to load previous cycle context if available)
+        rejection_context: Dict with rejection reason from a previous attempt (for retry-with-constraints).
+            Keys: reason (str), and context-specific fields (regressions, protected_questions, max_allowed, etc.)
     """
     # Handle backward compatibility: if pdf_files is a string, convert to list
     if pdf_files and isinstance(pdf_files, (str, Path)):
@@ -549,6 +662,8 @@ def analyze_with_gemini(excel_file, sheet_name, pdf_files=None, model_name=None,
     
     # Configure Gemini API with timeout settings
     GEMINI_TIMEOUT_SECONDS = 180  # 3 minutes timeout
+    GEMINI_UPLOAD_MAX_ATTEMPTS = 5  # retry up to 5 times per file
+    GEMINI_UPLOAD_RETRY_DELAY_SEC = 5  # wait between retries
     genai.configure(api_key=api_key)
     
     # Upload all PDF files if provided
@@ -559,16 +674,22 @@ def analyze_with_gemini(excel_file, sheet_name, pdf_files=None, model_name=None,
             pdf_file_str = str(pdf_file_path)
             if os.path.exists(pdf_file_str):
                 log_print(f"  📄 Uploading: {pdf_file_path.name}...")
-                try:
-                    pdf_file_obj = genai.upload_file(path=pdf_file_str, mime_type="application/pdf")
-                    while genai.get_file(pdf_file_obj.name).state.name == "PROCESSING":
-                        print(".", end="", flush=True)
-                        time.sleep(2)
-                        pdf_file_obj = genai.get_file(pdf_file_obj.name)
-                    print(" ✓")
-                    pdf_file_objs.append(pdf_file_obj)
-                except Exception as e:
-                    log_print(f"  ⚠️  Failed to upload {pdf_file_path.name}: {e}")
+                for attempt in range(1, GEMINI_UPLOAD_MAX_ATTEMPTS + 1):
+                    try:
+                        pdf_file_obj = genai.upload_file(path=pdf_file_str, mime_type="application/pdf")
+                        while genai.get_file(pdf_file_obj.name).state.name == "PROCESSING":
+                            print(".", end="", flush=True)
+                            time.sleep(2)
+                            pdf_file_obj = genai.get_file(pdf_file_obj.name)
+                        print(" ✓")
+                        pdf_file_objs.append(pdf_file_obj)
+                        break
+                    except Exception as e:
+                        if attempt < GEMINI_UPLOAD_MAX_ATTEMPTS:
+                            log_print(f"  ⚠️  Attempt {attempt}/{GEMINI_UPLOAD_MAX_ATTEMPTS} failed, retry in {GEMINI_UPLOAD_RETRY_DELAY_SEC}s...")
+                            time.sleep(GEMINI_UPLOAD_RETRY_DELAY_SEC)
+                        else:
+                            log_print(f"  ⚠️  Failed to upload {pdf_file_path.name} after {GEMINI_UPLOAD_MAX_ATTEMPTS} attempts: {e}")
             else:
                 log_print(f"  ⚠️  PDF file not found: {pdf_file_str}")
         
@@ -1008,6 +1129,63 @@ def analyze_with_gemini(excel_file, sheet_name, pdf_files=None, model_name=None,
         log_print("❌ ERROR: geminiInstructions template is empty in YAML")
         sys.exit(1)
     
+    # Inject rejection context if this is a retry attempt
+    if rejection_context:
+        rejection_section = "\n\n# RETRY REQUIRED - YOUR PREVIOUS PROPOSAL WAS REJECTED\n\n"
+        reason = rejection_context.get('reason', 'unknown')
+        
+        if reason == 'prompt_too_large':
+            rejection_section += (
+                f"**Rejection Reason:** Your proposed prompt was {rejection_context.get('proposed_length', '?')} characters. "
+                f"Maximum allowed: {rejection_context.get('max_allowed', '?')} characters.\n\n"
+                "**Requirements for retry:**\n"
+                f"1. Your new prompt MUST be <= {rejection_context.get('max_allowed', '?')} characters\n"
+                "2. Prioritize HIGHEST IMPACT changes only\n"
+                "3. Remove redundant or low-priority instructions\n"
+                "4. Prefer tightening existing rules over adding new ones\n"
+            )
+        elif reason == 'regressions_detected':
+            regressions = rejection_context.get('regressions', [])
+            new_passes = rejection_context.get('new_passes', [])
+            net = rejection_context.get('net_improvement', 0)
+            protected = rejection_context.get('protected_questions', [])
+            rejection_section += (
+                f"**Rejection Reason:** Your changes caused regressions (net improvement: {net}).\n\n"
+                f"- Questions that REGRESSED (were passing, now failing): {', '.join(regressions)}\n"
+                f"- Questions that IMPROVED (were failing, now passing): {', '.join(new_passes) if new_passes else 'none'}\n\n"
+                "**Requirements for retry:**\n"
+                f"1. DO NOT modify instructions that affect these protected questions: {', '.join(protected)}\n"
+                "2. Identify which specific changes caused the regressions and REMOVE them\n"
+                "3. Keep only changes that improve failing questions WITHOUT breaking passing ones\n"
+                "4. Be MORE CONSERVATIVE - prefer smaller, surgical edits\n"
+            )
+        
+        # Insert rejection context after the ITERATIVE REFINEMENT PROCESS section
+        if '# TOKEN BUDGET' in prompt:
+            prompt = prompt.replace('# TOKEN BUDGET', rejection_section + '\n# TOKEN BUDGET')
+        else:
+            prompt = rejection_section + prompt
+        
+        log_print(f"  ✓ Injected rejection context (reason: {reason})")
+    
+    # Inject protected questions list (dynamically built from previous cycle results)
+    protected_questions_text = rejection_context.get('protected_questions_text', '') if rejection_context else ''
+    if not protected_questions_text and config_dict:
+        protected_questions_text = config_dict.get('_protected_questions_text', '')
+    
+    if protected_questions_text:
+        protected_section = (
+            "\n\n# PROTECTED QUESTIONS - DO NOT BREAK THESE\n"
+            "The following questions are currently passing. Your modifications MUST NOT cause any of these to fail. "
+            "If a proposed change would risk breaking a protected question, DO NOT include that change.\n\n"
+            f"{protected_questions_text}\n"
+        )
+        if '# YOUR TASK' in prompt:
+            prompt = prompt.replace('# YOUR TASK', protected_section + '\n# YOUR TASK')
+        else:
+            prompt += protected_section
+        log_print(f"  ✓ Injected protected questions list")
+    
     # Store the full prompt for later use (e.g., adding to Excel metadata)
     # This is the complete instructions sent to Gemini (with all variables substituted)
     full_gemini_instructions = str(prompt) if prompt else ""  # Ensure it's always a string
@@ -1387,7 +1565,8 @@ def analyze_with_gemini(excel_file, sheet_name, pdf_files=None, model_name=None,
 # ============================================================================
 
 def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_input=None, yaml_config_dict=None, progress_callback=None,
-                     resume=False, resume_from_step=None, resume_from_cycle=None, clean_state_flag=False, show_state_flag=False, run_id=None):
+                     resume=False, resume_from_step=None, resume_from_cycle=None, clean_state_flag=False, show_state_flag=False, run_id=None,
+                     max_cycles=10):
     """
     Unified iterative workflow:
     - Step 1: Update Index (beginning of cycle, except Cycle 1)
@@ -1402,6 +1581,7 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
         resume_from_cycle: Resume from specific cycle number
         clean_state_flag: If True, delete state files and start fresh
         show_state_flag: If True, display current state and exit
+        max_cycles: Maximum number of refinement cycles (default: 10)
     """
     
     # Handle show state
@@ -1422,18 +1602,27 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
     if yaml_config_dict:
         yaml_config = yaml_config_dict
         log_print("  ✅ Using YAML config from dict")
-    elif yaml_input and os.path.exists(yaml_input):
-        log_print(f"📋 Reading YAML configuration: {yaml_input}")
-        with open(yaml_input, 'r') as f:
+    elif yaml_input:
+        yaml_path = Path(yaml_input).resolve()
+        if not yaml_path.exists():
+            log_print("❌ ERROR: YAML file not found")
+            log_print(f"   Path: {yaml_path}")
+            sys.exit(1)
+        log_print(f"📋 Reading YAML configuration: {yaml_path}")
+        with open(yaml_path, 'r') as f:
             yaml_config = yaml.safe_load(f)
         log_print("  ✅ YAML config frozen for this run")
     else:
         log_print("❌ ERROR: Either yaml_input file or yaml_config_dict is REQUIRED for full workflow")
-        log_print(f"   Provided yaml_input: {yaml_input}")
         sys.exit(1)
     
     config = yaml_config.get('configuration', {})
     questions_config = yaml_config.get('questions', [])
+    log_print(f"  📋 Loaded {len(questions_config)} questions from YAML")
+    
+    # Get maxCycles from YAML (override command line arg if provided)
+    max_cycles = config.get('maxCycles', max_cycles)
+    log_print(f"  ℹ️  Max refinement cycles: {max_cycles}")
     
     # Get Gemini model from YAML (override command line arg if provided)
     gemini_model = config.get('geminiModel', model_name)  # Use YAML value, fallback to command line arg
@@ -1462,42 +1651,35 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
             log_print(f"  ⚠️  Could not load PDFs from database: {e}")
             # Fall through to filesystem check
     
-    # If no PDFs from database, try filesystem
+    # If no PDFs from database, try filesystem (local only; Heroku uses DB)
     if not pdf_files:
         pdf_directory = config.get('pdfDirectory', '')
         if pdf_directory:
-            pdf_dir_path = Path(pdf_directory)
+            pdf_dir_path = Path(pdf_directory).expanduser()
             if not pdf_dir_path.is_absolute():
-                # Resolve relative to script location
-                # First try app_data/uploads (where uploaded PDFs are stored)
-                app_data = Path(__file__).parent / "app_data" / "uploads"
-                if (app_data / pdf_directory).exists():
-                    pdf_dir_path = app_data / pdf_directory
-                elif app_data.exists() and pdf_directory.startswith("uploads/"):
-                    # Handle case where path includes "uploads/" prefix
-                    pdf_dir_path = app_data / pdf_directory.replace("uploads/", "")
-                else:
-                    # Fallback: try as relative to script
-                    script_dir = Path(__file__).parent
-                    pdf_dir_path = script_dir / pdf_directory
-            
+                log_print("❌ ERROR: pdfDirectory must be an absolute path for local runs. Example: /Users/you/project/inputs/pdf/RiteHite")
+                sys.exit(1)
+            pdf_dir_path = pdf_dir_path.resolve()
             if pdf_dir_path.exists() and pdf_dir_path.is_dir():
-                # Find all PDF files in directory
                 pdf_files = sorted(list(pdf_dir_path.glob('*.pdf')))
                 if pdf_files:
-                    log_print(f"  📁 Found {len(pdf_files)} PDF file(s) in directory: {pdf_directory}")
+                    log_print(f"  📁 Found {len(pdf_files)} PDF file(s) in directory: {pdf_dir_path}")
                     for pdf_file in pdf_files:
                         log_print(f"     - {pdf_file.name}")
                 else:
-                    log_print(f"  ⚠️  No PDF files found in directory: {pdf_directory}")
+                    log_print(f"  ⚠️  No PDF files found in directory: {pdf_dir_path}")
             else:
-                log_print(f"  ⚠️  PDF directory not found: {pdf_directory}")
+                log_print(f"  ⚠️  PDF directory not found: {pdf_dir_path}")
         else:
             # Fallback to single PDF file from command line if directory not specified
             if pdf_file and os.path.exists(pdf_file):
                 pdf_files = [Path(pdf_file)]
                 log_print(f"  📄 Using single PDF file from command line: {pdf_file}")
-    
+
+    if not pdf_files:
+        log_print("❌ ERROR: No PDF files found. Set pdfDirectory in YAML (absolute path to folder containing PDFs) or provide PDFs. Gemini needs source documents for analysis. Exiting.")
+        sys.exit(1)
+
     # Call progress callback if provided
     if progress_callback:
         try:
@@ -1517,7 +1699,10 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
     outputs_dir = app_data / "outputs"
     outputs_dir.mkdir(exist_ok=True)
     
-    run_excel_file = outputs_dir / f"IEM_POC_questions_{run_id}.xlsx"
+    # Project name from YAML (used as Excel filename prefix); default for backward compatibility
+    project_name_raw = config.get('projectName', 'prompt_optimization')
+    project_name_safe = re.sub(r'[^\w\-]', '_', str(project_name_raw).strip()).strip('_') or 'prompt_optimization'
+    run_excel_file = outputs_dir / f"{project_name_safe}_{run_id}.xlsx"
     log_print(f"  ✅ Run ID: {run_id}")
     log_print(f"  ✅ Run-specific Excel file: {run_excel_file.name}")
     log_print(f"  📁 Output directory: {outputs_dir}")
@@ -1546,10 +1731,14 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
         log_print("❌ ERROR: Salesforce credentials (username, password, instanceUrl) are required in YAML configuration")
         sys.exit(1)
     
-    # Extract questions list
+    # Extract questions list. When promptInputs is set, pass full dict per question so excel_io can use inputs for multi-input; else tuple (number, text, expectedAnswer).
+    prompt_inputs = config.get('promptInputs') or []
     questions_list = []
     for q in questions_config:
-        questions_list.append((q.get('number', ''), q.get('text', ''), q.get('expectedAnswer', '')))
+        if prompt_inputs and (q.get('inputs') or q.get('text')):
+            questions_list.append(dict(q))  # full dict for multi-input (number, text, expectedAnswer, inputs)
+        else:
+            questions_list.append((q.get('number', ''), q.get('text', ''), q.get('expectedAnswer', '')))
     
     if not questions_list:
         log_print("❌ ERROR: No questions found in YAML configuration")
@@ -1621,37 +1810,48 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                                     excel_file_path = row[2] if len(row) > 2 else None
                                 
                                 if checkpoint:
-                                    log_print(f"  ✅ Found checkpoint in database: Cycle {checkpoint.get('cycle')}, Step {checkpoint.get('step')}")
-                                    
-                                    # CRITICAL: Load Excel file from database if it exists but not on disk
-                                    resolved_excel_file = excel_file_path or excel_file
-                                    if excel_file_path and not Path(excel_file_path).exists():
-                                        try:
-                                            from app import load_excel_from_db
-                                            loaded_path = load_excel_from_db(run_id)
-                                            if loaded_path:
-                                                resolved_excel_file = loaded_path
-                                                log_print(f"  ✅ Loaded Excel file from database: {Path(loaded_path).name}")
-                                        except Exception as e:
-                                            log_print(f"  ⚠️  Could not load Excel from DB: {e}")
-                                    
-                                    # Build state-like structure from checkpoint_info
-                                    state = {
-                                        'cycle_number': checkpoint.get('cycle', 1),
-                                        'last_completed_step': checkpoint.get('step', 0) - 1 if checkpoint.get('step', 0) > 0 else 0,
-                                        'run_id': run_id,
-                                        'excel_file': resolved_excel_file,
-                                        'yaml_config_snapshot': config_data if config_data else yaml_config,
-                                        '_from_database_checkpoint': True  # Flag to skip validation
-                                    }
-                                    
-                                    # Override resume parameters from checkpoint
-                                    if checkpoint.get('cycle'):
-                                        resume_from_cycle = checkpoint.get('cycle')
-                                    if checkpoint.get('step'):
-                                        resume_from_step = checkpoint.get('step')
-                                    
-                                    log_print(f"  ✅ Resuming from Cycle {resume_from_cycle}, Step {resume_from_step}")
+                                    # Site isolation: refuse to resume if checkpoint is from a different org
+                                    current_instance_url = (config.get('salesforce') or {}).get('instanceUrl', '')
+                                    checkpoint_instance_url = ''
+                                    if config_data:
+                                        checkpoint_instance_url = (config_data.get('configuration') or {}).get('salesforce', {}).get('instanceUrl', '')
+                                    if not _sites_match(current_instance_url, checkpoint_instance_url):
+                                        log_print("  ❌ Cannot resume: Database checkpoint is from a different site")
+                                        log_print(f"     Current YAML site: {current_instance_url or 'unknown'}")
+                                        log_print(f"     Checkpoint site: {checkpoint_instance_url or 'unknown'}")
+                                    else:
+                                        log_print(f"  ✅ Found checkpoint in database: Cycle {checkpoint.get('cycle')}, Step {checkpoint.get('step')}")
+                                        
+                                        # CRITICAL: Load Excel file from database if it exists but not on disk
+                                        resolved_excel_file = excel_file_path or excel_file
+                                        if excel_file_path and not Path(excel_file_path).exists():
+                                            try:
+                                                from app import load_excel_from_db
+                                                loaded_path = load_excel_from_db(run_id)
+                                                if loaded_path:
+                                                    resolved_excel_file = loaded_path
+                                                    log_print(f"  ✅ Loaded Excel file from database: {Path(loaded_path).name}")
+                                            except Exception as e:
+                                                log_print(f"  ⚠️  Could not load Excel from DB: {e}")
+                                        
+                                        # Build state-like structure from checkpoint_info
+                                        state = {
+                                            'cycle_number': checkpoint.get('cycle', 1),
+                                            'last_completed_step': checkpoint.get('step', 0) - 1 if checkpoint.get('step', 0) > 0 else 0,
+                                            'run_id': run_id,
+                                            'instance_url': current_instance_url or checkpoint_instance_url,
+                                            'excel_file': resolved_excel_file,
+                                            'yaml_config_snapshot': config_data if config_data else yaml_config,
+                                            '_from_database_checkpoint': True  # Flag to skip validation
+                                        }
+                                        
+                                        # Override resume parameters from checkpoint
+                                        if checkpoint.get('cycle'):
+                                            resume_from_cycle = checkpoint.get('cycle')
+                                        if checkpoint.get('step'):
+                                            resume_from_step = checkpoint.get('step')
+                                        
+                                        log_print(f"  ✅ Resuming from Cycle {resume_from_cycle}, Step {resume_from_step}")
                             else:
                                 log_print("  ℹ️  No checkpoint_info found in database, trying state files...")
                         finally:
@@ -1664,65 +1864,86 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                 traceback.print_exc()
         
         # Fallback to state files if database checkpoint not found
-        if not state:
-            state = load_state(resume_from_step=resume_from_step, resume_from_cycle=resume_from_cycle, run_id=run_id)
+        # Require instance_url so we only consider same-site state; never resume from wrong org
+        current_instance_url = (config.get('salesforce') or {}).get('instanceUrl')
+        if not current_instance_url:
+            log_print("  ❌ Cannot resume: instanceUrl required in YAML configuration (site isolation)")
+            raise RuntimeError("Cannot resume: instanceUrl required for site isolation")
         
         if not state:
-            log_print("  ❌ ERROR: No checkpoint found in database or state files. Cannot resume.")
-            log_print("  💡 Tip: Run without --resume to start a new workflow")
-            # Don't sys.exit() - let the caller handle it (worker will mark as failed)
-            raise RuntimeError("Cannot resume: No checkpoint found in database or state files")
+            state = load_state(resume_from_step=resume_from_step, resume_from_cycle=resume_from_cycle, run_id=None, instance_url=current_instance_url)
         
-        # Use frozen YAML config from state (not from file)
-        if 'yaml_config_snapshot' in state:
-            yaml_config = state['yaml_config_snapshot']
-            log_print("  ✅ Using frozen YAML config from state")
-            config = yaml_config.get('configuration', {})
-            questions_config = yaml_config.get('questions', [])
+        if not state:
+            # No checkpoint for this site: start fresh Cycle 1 (don't fail)
+            log_print("  ℹ️  No checkpoint found for this site – starting Cycle 1 from scratch")
+            log_print(f"  🆔 New run: {run_id}")
+            # state stays None; loop below will init cycle_number=1, is_resuming=False
         else:
-            # If no snapshot in state, use the yaml_config_dict that was passed in
-            log_print("  ℹ️  No frozen YAML config in state, using provided config")
-            # yaml_config is already set from function parameter
-        
-        # Use run_id and excel_file from state (if available)
-        if state.get('run_id'):
-            run_id = state.get('run_id')
-        state_excel_file = state.get('excel_file', excel_file)
-        
-        # Validate state (skip validation if loading from database checkpoint - Excel file might not exist yet)
-        if state.get('_from_database_checkpoint'):
-            log_print("  ℹ️  Skipping state validation (loaded from database checkpoint)")
-            # Excel file path from database should be valid
-            if state_excel_file and state_excel_file != excel_file:
-                excel_file = state_excel_file
-        else:
-            is_valid, validation_msg = validate_state(state, state_excel_file)
-            if not is_valid:
-                log_print(f"  ❌ ERROR: State validation failed: {validation_msg}")
-                log_print("  💡 Tip: Use --clean-state to start fresh")
-                raise RuntimeError(f"State validation failed: {validation_msg}")
+            # Use frozen YAML config from state (not from file)
+            if 'yaml_config_snapshot' in state:
+                yaml_config = state['yaml_config_snapshot']
+                log_print("  ✅ Using frozen YAML config from state")
+                config = yaml_config.get('configuration', {})
+                questions_config = yaml_config.get('questions', [])
+                # Re-extract credentials from state config (critical for correct org)
+                sf = config.get('salesforce', {})
+                username = sf.get('username')
+                password = sf.get('password')
+                instance_url = sf.get('instanceUrl')
+                if username:
+                    log_print(f"  🔑 Credentials from state: {username} @ {instance_url or '(instance)'}")
+            else:
+                log_print("  ℹ️  No frozen YAML config in state, using provided config")
             
-            # Update excel_file to use resolved path from validation
-            excel_file = state_excel_file
-        
-        log_print(f"  ✅ State loaded: Cycle {state.get('cycle_number')}, Last step: {state.get('last_completed_step')}")
-        log_print(f"  📄 Sheet: {state.get('sheet_name')}")
-        log_print(f"  🆔 Run ID: {run_id}")
-        
-        # Determine resume step
-        last_completed = state.get('last_completed_step', 0)
-        # If last step was 3 (cycle completed), start next cycle from Step 1
-        if last_completed == 3:
-            # Cycle completed - start next cycle from Step 1
-            resume_step = None  # Start fresh cycle
-            log_print(f"  ℹ️  Previous cycle completed - starting next cycle from Step 1")
-        else:
-            # Resume within the same cycle
-            resume_step = last_completed + 1
-            if resume_from_step:
-                resume_step = resume_from_step
-        
-        log_print(f"  🔄 Resuming from Step {resume_step}")
+            # Use run_id and excel_file from state (if available)
+            if state.get('run_id'):
+                run_id = state.get('run_id')
+            state_excel_file = state.get('excel_file', excel_file)
+            
+            # If sheet_name is None (e.g. after Step 1 failure) but we have a previous cycle, recover from prev cycle state
+            if not state.get('sheet_name') and state.get('cycle_number', 1) > 1:
+                state_dir = get_state_dir()
+                prev_cycle = state.get('cycle_number', 2) - 1
+                prev_file = state_dir / f"run_{run_id}_cycle_{prev_cycle}_state.json" if run_id else state_dir / f"cycle_{prev_cycle}_state.json"
+                if prev_file.exists():
+                    try:
+                        with open(prev_file, 'r') as f:
+                            prev = json.load(f)
+                        prev_sheet = prev.get('sheet_name')
+                        if prev_sheet:
+                            state['sheet_name'] = prev_sheet
+                            disp = (prev_sheet[:57] + '...') if len(prev_sheet) > 60 else prev_sheet
+                            log_print(f"  ℹ️  Recovered sheet_name from Cycle {prev_cycle} state: {disp}")
+                    except Exception as e:
+                        log_print(f"  ⚠️  Could not recover sheet from prev cycle: {e}")
+            
+            # Validate state (skip validation if loading from database checkpoint - Excel file might not exist yet)
+            if state.get('_from_database_checkpoint'):
+                log_print("  ℹ️  Skipping state validation (loaded from database checkpoint)")
+                if state_excel_file and state_excel_file != excel_file:
+                    excel_file = state_excel_file
+            else:
+                is_valid, validation_msg = validate_state(state, state_excel_file)
+                if not is_valid:
+                    log_print(f"  ❌ ERROR: State validation failed: {validation_msg}")
+                    log_print("  💡 Tip: Use --clean-state to start fresh")
+                    raise RuntimeError(f"State validation failed: {validation_msg}")
+                excel_file = state_excel_file
+            
+            log_print(f"  ✅ State loaded: Cycle {state.get('cycle_number')}, Last step: {state.get('last_completed_step')}")
+            log_print(f"  📄 Sheet: {state.get('sheet_name')}")
+            log_print(f"  🆔 Run ID: {run_id}")
+            
+            # Determine resume step
+            last_completed = state.get('last_completed_step', 0)
+            if last_completed == 3:
+                resume_step = None
+                log_print(f"  ℹ️  Previous cycle completed - starting next cycle from Step 1")
+            else:
+                resume_step = last_completed + 1
+                if resume_from_step:
+                    resume_step = resume_from_step
+            log_print(f"  🔄 Resuming from Step {resume_step}")
     else:
         # New run: initialize state with frozen config
         state = {}
@@ -1737,7 +1958,6 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
     #   Step 3: Analyze Results (Gemini analysis)
     # Cycle 1: Skip Step 1, start with Step 2 (test baseline), then Step 3
     # Cycle 2+: Start with Step 1 (update using previous cycle's improvements), then Step 2, then Step 3
-    max_cycles = 10  # Safety limit to prevent infinite loops
     
     # Initialize state variables
     if state:
@@ -1767,6 +1987,11 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
     # Initialize heartbeat tracking
     last_heartbeat = datetime.now()
     heartbeat_interval = 30  # Update heartbeat every 30 seconds during long operations
+    
+    # Consecutive no-improvement tracking (exit after 2 consecutive stalls)
+    consecutive_no_improvement = 0
+    MAX_CONSECUTIVE_NO_IMPROVEMENT = 2
+    prev_composite_score = -1  # composite = pass_count * 2 + partial_count
     
     while cycle_number <= max_cycles:
         # Clear resume flag if we were resuming
@@ -1802,9 +2027,12 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
         
         # Determine if this is Cycle 1 (baseline test, no update needed)
         # Cycle 1 is when cycle_number == 1 AND we don't have a previous cycle's proposed prompt
-        # Check if previous cycle state exists
+        # Check if previous cycle state exists (run-specific when run_id provided)
         state_dir = get_state_dir()
-        prev_cycle_file = state_dir / f"cycle_{cycle_number - 1}_state.json"
+        if run_id:
+            prev_cycle_file = state_dir / f"run_{run_id}_cycle_{cycle_number - 1}_state.json"
+        else:
+            prev_cycle_file = state_dir / f"cycle_{cycle_number - 1}_state.json"
         has_previous_cycle = prev_cycle_file.exists()
         is_cycle_1 = (cycle_number == 1 and not has_previous_cycle)
         
@@ -1851,7 +2079,10 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                         log_print(f"  ⚠️  Main state is from Cycle {state_cycle}, but we need Cycle {cycle_number - 1}")
                         # Try to find any cycle file that might have the previous cycle's prompt
                         for try_cycle in range(cycle_number - 1, 0, -1):
-                            try_file = state_dir / f"cycle_{try_cycle}_state.json"
+                            if run_id:
+                                try_file = state_dir / f"run_{run_id}_cycle_{try_cycle}_state.json"
+                            else:
+                                try_file = state_dir / f"cycle_{try_cycle}_state.json"
                             if try_file.exists():
                                 try:
                                     with open(try_file, 'r') as f:
@@ -1871,72 +2102,69 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                 log_print("  ℹ️  Proceeding to test current index state")
             elif refinement_stage == "llm_parser":
                 log_print("\n" + "-"*80)
-                log_print(f"STEP 1: Updating Index (applying Cycle {cycle_number - 1}'s improvements)")
+                log_print(f"STEP 1: Create Index + Retriever (applying Cycle {cycle_number - 1}'s improvements)")
                 log_print("-"*80)
                 
                 # Progress callback - step start
                 if progress_callback:
                     try:
-                        progress_callback({'status': 'step_start', 'cycle': cycle_number, 'step': 1, 'run_id': run_id, 'message': f'Step 1: Updating Search Index with Cycle {cycle_number - 1} improvements'})
+                        progress_callback({'status': 'step_start', 'cycle': cycle_number, 'step': 1, 'run_id': run_id, 'message': f'Step 1: Creating Search Index and Retriever with Cycle {cycle_number - 1} improvements'})
                     except:
                         pass
                 
-                # Check if index is already being processed by another run
-                is_locked, error_msg = check_index_lock(search_index_id)
+                # Lock per prompt template (design: one run at a time per template)
+                is_locked, error_msg = check_prompt_template_lock(prompt_template_name)
                 if is_locked:
                     log_print(f"\n❌ ERROR: {error_msg}")
-                    log_print("❌ Cannot proceed - there's already a job running on optimizing the prompt for this index.")
-                    log_print("❌ Please wait for the other run to complete or stop it before starting a new one.")
+                    log_print("❌ Cannot proceed - there's already a job running on this prompt template.")
                     sys.exit(1)
                 
-                # Acquire lock for this index
-                lock_acquired, lock_error = acquire_index_lock(search_index_id, run_id)
+                lock_acquired, lock_error = acquire_prompt_template_lock(prompt_template_name, run_id)
                 if not lock_acquired:
-                    log_print(f"\n❌ ERROR: Failed to acquire index lock: {lock_error}")
+                    log_print(f"\n❌ ERROR: Failed to acquire lock: {lock_error}")
                     sys.exit(1)
-                log_print(f"   🔒 Acquired lock for index {search_index_id}")
+                log_print(f"   🔒 Acquired lock for prompt template {prompt_template_name}")
                 
                 log_print(f"   Previous cycle's prompt length: {len(previous_cycle_prompt)} chars")
                 
                 try:
-                    # Get headless and slowMo settings from YAML
                     headless_mode = config.get('headless', False)
-                    slow_mo_value = config.get('slowMo', 0)
+                    state_dir = get_state_dir()
                     
-                    # Call async function using asyncio.run()
-                    asyncio.run(update_search_index_prompt(
+                    new_index_id, new_retriever_api_name = asyncio.run(run_new_index_pipeline(
                         username=username,
                         password=password,
                         instance_url=instance_url,
-                        search_index_id=search_index_id,
-                        new_prompt=previous_cycle_prompt,
+                        prompt_template_api_name=prompt_template_name,
+                        previous_cycle_prompt=previous_cycle_prompt,
+                        state_dir=state_dir,
                         run_id=run_id,
-                        capture_network=False,
-                        take_screenshots=take_screenshots,
                         headless=headless_mode,
-                        slow_mo=slow_mo_value
                     ))
-                    log_print("\n✅ Step 1 Complete: Search Index updated and rebuilt")
                     
-                    # Progress callback
+                    if not new_index_id or not new_retriever_api_name:
+                        raise RuntimeError("Pipeline did not complete (aborted or failed)")
+                    
+                    # Use new index for rest of cycle (Step 2 fetches parser prompt from it)
+                    search_index_id = new_index_id
+                    log_print("\n✅ Step 1 Complete: Search Index and Retriever created, prompt template updated")
+                    
                     if progress_callback:
                         try:
-                            progress_callback({'status': 'step_complete', 'cycle': cycle_number, 'step': 1, 'run_id': run_id, 'message': 'Search Index updated and rebuilt'})
+                            progress_callback({'status': 'step_complete', 'cycle': cycle_number, 'step': 1, 'run_id': run_id, 'message': 'Search Index and Retriever created'})
                         except:
                             pass
                     
-                    # Release lock after Step 1 completes
-                    release_index_lock(search_index_id)
-                    log_print(f"   🔓 Released lock for index {search_index_id}")
+                    release_prompt_template_lock(prompt_template_name)
+                    log_print(f"   🔓 Released lock for prompt template {prompt_template_name}")
                     
-                    # Save state after Step 1
                     save_state(
                         cycle_number=cycle_number,
                         last_completed_step=1,
-                        sheet_name=new_sheet_name,  # May be None if first step
+                        sheet_name=new_sheet_name,
                         refinement_stage=refinement_stage,
-                        stage_status=None,  # Not analyzed yet
-                        proposed_llm_parser_prompt=None,  # Will be set in Step 3
+                        stage_status=None,
+                        proposed_llm_parser_prompt=None,
                         proposed_response_prompt=None,
                         stage_complete_reason=None,
                         excel_file=excel_file,
@@ -1944,9 +2172,8 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                         yaml_config_snapshot=yaml_config
                     )
                 except Exception as e:
-                    # Release lock on error
-                    release_index_lock(search_index_id)
-                    log_print(f"   🔓 Released lock for index {search_index_id} (after error)")
+                    release_prompt_template_lock(prompt_template_name)
+                    log_print(f"   🔓 Released lock for prompt template {prompt_template_name} (after error)")
                     log_print(f"\n❌ Step 1 Failed: {str(e)}")
                     
                     # Progress callback - report error
@@ -1961,8 +2188,8 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                         except:
                             pass
                     
-                    log_print("\n❌ CRITICAL ERROR: Step 1 (Search Index Update) failed.")
-                    log_print("❌ The workflow cannot continue without successfully updating the search index.")
+                    log_print("\n❌ CRITICAL ERROR: Step 1 (Search Index and Retriever Creation) failed.")
+                    log_print("❌ The workflow cannot continue without successfully creating the search index and retriever.")
                     log_print("❌ This is a critical step and cannot be skipped.")
                     log_print(f"❌ Error details: {str(e)}")
                     log_print("\n💡 Possible solutions:")
@@ -1987,7 +2214,7 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                     )
                     
                     # Stop the workflow - don't continue
-                    raise RuntimeError(f"Step 1 (Search Index Update) failed: {str(e)}. Workflow stopped.")
+                    raise RuntimeError(f"Step 1 (Search Index and Retriever Creation) failed: {str(e)}. Workflow stopped.")
             else:
                 log_print("\n" + "-"*80)
                 log_print(f"STEP 1: SKIPPED (Current refinement stage is '{refinement_stage}', not 'llm_parser')")
@@ -2148,36 +2375,202 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                     pass
             
             try:
-                analysis_result = analyze_with_gemini(
-                    excel_file=excel_file,
-                    sheet_name=new_sheet_name,
-                    pdf_files=pdf_files,  # Pass list of PDF files instead of single file
-                    model_name=gemini_model,  # Use model from YAML
-                    config_dict=yaml_config,
-                    cycle_number=cycle_number
-                )
+                # Abort check before Gemini (design: check at key points)
+                if run_id:
+                    from worker_utils import check_run_aborted
+                    if check_run_aborted(run_id):
+                        log_print("❌ Job aborted before Gemini analysis. Stopping workflow.")
+                        raise RuntimeError("Job aborted")
                 
-                # Extract results from analysis
-                proposed_llm_parser_prompt = analysis_result.get('proposed_llm_parser_prompt', '')
-                stage_status = analysis_result.get('stage_status', '')
-                stage_complete_reason = analysis_result.get('stage_complete_reason', '')
+                # ============================================================
+                # SAFEGUARD: Build protected questions list from previous cycle
+                # ============================================================
+                prev_passing_questions = []
+                prev_pass_rate = 0.0
+                if cycle_number > 1:
+                    prev_cycle_sheets = []
+                    try:
+                        import re as _re
+                        xls = pd.ExcelFile(excel_file)
+                        for _s in xls.sheet_names:
+                            _m = _re.search(r'cycle(\d+)', _s)
+                            if _m and int(_m.group(1)) == cycle_number - 1:
+                                prev_cycle_sheets.append(_s)
+                    except Exception:
+                        pass
+                    
+                    if prev_cycle_sheets:
+                        prev_cycle_sheets.sort(reverse=True)
+                        prev_results_data = extract_results_from_sheet(excel_file, prev_cycle_sheets[0])
+                        if prev_results_data:
+                            prev_pass_rate = prev_results_data.get('pass_rate', 0.0)
+                            for qr in prev_results_data.get('question_results', []):
+                                if qr.get('status') in ('PASS', 'PARTIAL'):
+                                    prev_passing_questions.append(qr['q_number'])
                 
-                log_print(f"\n✅ Step 3 Complete: Gemini analysis finished")
-                log_print(f"   Stage Status: {stage_status}")
-                if stage_complete_reason:
-                    log_print(f"   Reason: {stage_complete_reason[:100]}...")
+                # Build protected questions text for Gemini
+                protected_questions_text = ""
+                if prev_passing_questions:
+                    protected_lines = []
+                    for q_num in prev_passing_questions:
+                        q_match = next((q for q in questions_list if q.get('number') == q_num), None)
+                        if q_match:
+                            inputs = q_match.get('inputs', {})
+                            product = inputs.get('Input:Product', '')
+                            question = inputs.get('Input:Question', '')
+                            expected = q_match.get('expectedAnswer', '')
+                            protected_lines.append(f"- {q_num} [{product}]: {question[:60]}... -> {expected[:60]}...")
+                        else:
+                            protected_lines.append(f"- {q_num}: (currently passing)")
+                    protected_questions_text = '\n'.join(protected_lines)
+                    log_print(f"  ✓ Built protected questions list ({len(prev_passing_questions)} questions)")
                 
-                # Extract results for summary sheet
-                results_data = extract_results_from_sheet(excel_file, new_sheet_name)
+                # Inject protected questions into config for analyze_with_gemini
+                yaml_config_with_protected = yaml_config.copy()
+                if protected_questions_text:
+                    yaml_config_with_protected['_protected_questions_text'] = protected_questions_text
                 
-                # Update Running_Score sheet
-                update_run_summary_sheet(
-                    excel_file=excel_file,
-                    run_id=run_id,
-                    cycle_number=cycle_number,
-                    results_data=results_data,
-                    config_dict=yaml_config
-                )
+                # ============================================================
+                # SAFEGUARD: Retry loop with constraints
+                # ============================================================
+                MAX_RETRIES = 2
+                retry_count = 0
+                rejection_context = None
+                prompt_accepted = False
+                
+                # Get current prompt length for size constraint
+                current_prompt_length = 0
+                if cycle_number > 1:
+                    state_dir = get_state_dir()
+                    prev_state_file = state_dir / f"run_{run_id}_cycle_{cycle_number - 1}_state.json" if run_id else state_dir / f"cycle_{cycle_number - 1}_state.json"
+                    if prev_state_file.exists():
+                        try:
+                            with open(prev_state_file, 'r') as f:
+                                prev_state_data = json.load(f)
+                            current_prompt_length = len(prev_state_data.get('proposed_llm_parser_prompt', ''))
+                        except Exception:
+                            pass
+                
+                while retry_count <= MAX_RETRIES:
+                    if retry_count > 0:
+                        log_print(f"\n🔄 Retry {retry_count}/{MAX_RETRIES}: Asking Gemini to fix issues...")
+                    
+                    analysis_result = analyze_with_gemini(
+                        excel_file=excel_file,
+                        sheet_name=new_sheet_name,
+                        pdf_files=pdf_files,
+                        model_name=gemini_model,
+                        config_dict=yaml_config_with_protected,
+                        cycle_number=cycle_number,
+                        rejection_context=rejection_context
+                    )
+                    
+                    proposed_llm_parser_prompt = analysis_result.get('proposed_llm_parser_prompt', '')
+                    stage_status = analysis_result.get('stage_status', '')
+                    stage_complete_reason = analysis_result.get('stage_complete_reason', '')
+                    
+                    log_print(f"\n✅ Step 3 Complete: Gemini analysis finished")
+                    log_print(f"   Stage Status: {stage_status}")
+                    if stage_complete_reason:
+                        log_print(f"   Reason: {stage_complete_reason[:100]}...")
+                    
+                    # Extract current cycle results for comparison
+                    results_data = extract_results_from_sheet(excel_file, new_sheet_name)
+                    
+                    # ============================================================
+                    # SAFEGUARD 1: Prompt Size Constraint (150% max)
+                    # ============================================================
+                    if current_prompt_length > 0 and proposed_llm_parser_prompt:
+                        max_allowed = int(current_prompt_length * 1.5)
+                        proposed_length = len(proposed_llm_parser_prompt)
+                        
+                        if proposed_length > max_allowed:
+                            log_print(f"\n⚠️  PROMPT SIZE REJECTED: {proposed_length} chars > {max_allowed} max (150% of {current_prompt_length})")
+                            rejection_context = {
+                                'reason': 'prompt_too_large',
+                                'proposed_length': proposed_length,
+                                'current_length': current_prompt_length,
+                                'max_allowed': max_allowed
+                            }
+                            retry_count += 1
+                            continue
+                        else:
+                            log_print(f"   ✅ Prompt size OK: {proposed_length} chars (max: {max_allowed})")
+                    
+                    # ============================================================
+                    # SAFEGUARDS 2+3: Regression Detection + Net Improvement Gate
+                    # ============================================================
+                    if cycle_number > 1 and results_data and prev_passing_questions:
+                        curr_passing = [qr['q_number'] for qr in results_data.get('question_results', []) if qr.get('status') in ('PASS', 'PARTIAL')]
+                        curr_pass_rate = results_data.get('pass_rate', 0.0)
+                        
+                        regressions = sorted(set(prev_passing_questions) - set(curr_passing))
+                        new_passes = sorted(set(curr_passing) - set(prev_passing_questions))
+                        net_improvement = len(new_passes) - len(regressions)
+                        
+                        log_print(f"\n📊 Differential Analysis (Cycle {cycle_number} vs Cycle {cycle_number - 1}):")
+                        log_print(f"   Previous pass rate: {prev_pass_rate:.1f}% | Current: {curr_pass_rate:.1f}%")
+                        log_print(f"   New passes: {len(new_passes)} ({', '.join(new_passes) if new_passes else 'none'})")
+                        log_print(f"   Regressions: {len(regressions)} ({', '.join(regressions) if regressions else 'none'})")
+                        log_print(f"   Net improvement: {net_improvement:+d}")
+                        
+                        if regressions and net_improvement <= 0:
+                            log_print(f"\n⚠️  REJECTED: Regressions detected with no net improvement (net={net_improvement})")
+                            rejection_context = {
+                                'reason': 'regressions_detected',
+                                'regressions': regressions,
+                                'new_passes': new_passes,
+                                'net_improvement': net_improvement,
+                                'protected_questions': prev_passing_questions,
+                                'protected_questions_text': protected_questions_text
+                            }
+                            retry_count += 1
+                            continue
+                        elif regressions and net_improvement > 0:
+                            log_print(f"   ⚠️  Regressions detected but net improvement is positive (+{net_improvement}). Accepting with warning.")
+                        else:
+                            log_print(f"   ✅ No regressions detected")
+                    
+                    # All checks passed
+                    prompt_accepted = True
+                    break
+                
+                # ============================================================
+                # SAFEGUARD 4: Hard rollback if retries exhausted
+                # ============================================================
+                if not prompt_accepted:
+                    log_print(f"\n❌ Max retries ({MAX_RETRIES}) exhausted. Hard rollback to Cycle {cycle_number - 1} prompt.")
+                    
+                    # Load previous cycle's prompt
+                    state_dir = get_state_dir()
+                    prev_state_file = state_dir / f"run_{run_id}_cycle_{cycle_number - 1}_state.json" if run_id else state_dir / f"cycle_{cycle_number - 1}_state.json"
+                    if prev_state_file.exists():
+                        try:
+                            with open(prev_state_file, 'r') as f:
+                                prev_state_data = json.load(f)
+                            proposed_llm_parser_prompt = prev_state_data.get('proposed_llm_parser_prompt', '')
+                            log_print(f"   ✅ Rolled back to Cycle {cycle_number - 1} prompt ({len(proposed_llm_parser_prompt)} chars)")
+                        except Exception as rollback_err:
+                            log_print(f"   ⚠️  Rollback failed to load state: {rollback_err}")
+                    
+                    stage_status = "rolled_back"
+                    stage_complete_reason = (
+                        f"Hard rollback after {MAX_RETRIES} failed retries. "
+                        f"Last rejection: {rejection_context.get('reason', 'unknown') if rejection_context else 'unknown'}. "
+                        f"Keeping best known prompt from Cycle {cycle_number - 1}."
+                    )
+                    log_print(f"   Stage Status: {stage_status}")
+                    log_print(f"   Reason: {stage_complete_reason}")
+                
+                # Update Running_Score sheet (always, even on rollback)
+                if results_data:
+                    update_run_summary_sheet(
+                        excel_file=excel_file,
+                        run_id=run_id,
+                        cycle_number=cycle_number,
+                        results_data=results_data,
+                        config_dict=yaml_config
+                    )
                 
                 # Progress callback - include Excel file path AFTER it's been updated with analysis results
                 if progress_callback:
@@ -2250,12 +2643,46 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                 # Stop the workflow - don't continue
                 raise RuntimeError(f"Step 3 (Analyzing Results with Gemini) failed: {error_type}: {error_msg}. Workflow stopped.")
         
+        # Track composite score for consecutive no-improvement detection
+        if results_data:
+            curr_pass = results_data.get('pass_count', 0)
+            curr_partial = results_data.get('partial_count', 0)
+            curr_composite = curr_pass * 2 + curr_partial
+            log_print(f"\n📈 Composite Score: {curr_composite} (PASS={curr_pass}×2 + PARTIAL={curr_partial}×1)")
+            
+            if prev_composite_score >= 0:
+                if curr_composite > prev_composite_score:
+                    consecutive_no_improvement = 0
+                    log_print(f"   ✅ Improvement detected: {prev_composite_score} → {curr_composite} (+{curr_composite - prev_composite_score})")
+                else:
+                    consecutive_no_improvement += 1
+                    log_print(f"   ⚠️  No improvement: {prev_composite_score} → {curr_composite} (stall {consecutive_no_improvement}/{MAX_CONSECUTIVE_NO_IMPROVEMENT})")
+            prev_composite_score = curr_composite
+            
+            if consecutive_no_improvement >= MAX_CONSECUTIVE_NO_IMPROVEMENT:
+                log_print("\n" + "="*80)
+                log_print("⏹️  STOPPING: No improvement for 2 consecutive cycles")
+                log_print("="*80)
+                log_print(f"Composite score stalled at {curr_composite} (PASS={curr_pass}, PARTIAL={curr_partial})")
+                log_print(f"The parser has likely reached its optimization ceiling for these questions.")
+                break
+        
         # Check if we should continue
         if stage_status == "optimized":
             log_print("\n" + "="*80)
             log_print("✅ REFINEMENT COMPLETE!")
             log_print("="*80)
             log_print(f"Stage '{refinement_stage}' is optimized after {cycle_number} cycle(s)")
+            break
+        
+        if stage_status == "rolled_back":
+            log_print("\n" + "="*80)
+            log_print("⚠️  OPTIMIZATION STOPPED - ROLLBACK")
+            log_print("="*80)
+            log_print(f"Stage '{refinement_stage}' rolled back after {cycle_number} cycle(s)")
+            log_print(f"Reason: {stage_complete_reason}")
+            log_print("The optimizer could not improve without causing regressions.")
+            log_print("Consider: reviewing persistent failures manually, adjusting test questions, or trying a different model.")
             break
         
         # Continue to next cycle
@@ -2337,6 +2764,7 @@ def main():
     parser.add_argument('--resume', action='store_true', help='Resume from last checkpoint')
     parser.add_argument('--resume-from-step', type=int, choices=[1, 2, 3, 4], help='Resume from specific step (1-4)')
     parser.add_argument('--resume-from-cycle', type=int, help='Resume from specific cycle number')
+    parser.add_argument('--max-cycles', type=int, default=10, help='Maximum refinement cycles (default: 10)')
     parser.add_argument('--clean-state', action='store_true', help='Delete state files and start fresh')
     parser.add_argument('--show-state', action='store_true', help='Display current state and exit')
     
@@ -2351,6 +2779,7 @@ def main():
             resume=args.resume,
             resume_from_step=args.resume_from_step,
             resume_from_cycle=args.resume_from_cycle,
+            max_cycles=args.max_cycles,
             clean_state_flag=args.clean_state,
             show_state_flag=args.show_state,
         )
