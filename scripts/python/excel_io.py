@@ -18,6 +18,48 @@ def log_print(*args, **kwargs):
     print(*args, **kwargs, flush=True)
 
 
+def get_input_column_headers_and_rows(config_dict):
+    """
+    Single source of truth for prompt input columns used in both the analysis sheet and Running_Score.
+    Returns headers and per-question row values so first tab and run tabs stay in sync.
+
+    Args:
+        config_dict: Full config (e.g. YAML). May contain optional 'promptInputs' and 'questions'.
+
+    Returns:
+        tuple: (input_headers, list_of_rows)
+            - input_headers: e.g. ['Q#', 'Question'] or ['Q#', 'Product', 'Question']
+            - list_of_rows: list of lists, one per question, same length as input_headers
+    """
+    config = config_dict or {}
+    # Support full YAML: questions at top level, promptInputs under configuration
+    questions = config.get("questions") or []
+    prompt_inputs = config.get("promptInputs") or (config.get("configuration") or {}).get("promptInputs") or []
+
+    if not prompt_inputs:
+        # Single-input: Q# + Question
+        headers = ["Q#", "Question"]
+        rows = [[q.get("number", ""), q.get("text", "")] for q in questions]
+        return headers, rows
+
+    # Multi-input: Q# + one column per promptInputs (by displayName)
+    headers = ["Q#"] + [p.get("displayName") or p.get("apiName", "") for p in prompt_inputs]
+    api_names = [p.get("apiName", "") for p in prompt_inputs]
+
+    def row_for(q):
+        vals = [q.get("number", "")]
+        inputs_map = q.get("inputs") or {}
+        for api_name in api_names:
+            val = inputs_map.get(api_name)
+            if val is None and api_name == "Input:Question":
+                val = q.get("text", "")
+            vals.append(val if val is not None else "")
+        return vals
+
+    rows = [row_for(q) for q in questions]
+    return headers, rows
+
+
 def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
                                       prompt_template_name=None, search_index_id=None, models_list=None,
                                       refinement_stage=None, cycle_number=None, config_dict=None):
@@ -26,7 +68,7 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
     """
     # #region agent log (optional - only if debug.log exists locally)
     try:
-        debug_log_path = Path('/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/.cursor/debug.log')
+        debug_log_path = Path(__file__).resolve().parents[2] / ".cursor" / "debug.log"
         if debug_log_path.parent.exists():
             with open(debug_log_path, 'a') as f:
                 f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"ALL","location":"excel_io.py:create_analysis_sheet_with_prompts","message":"ENTRY","data":{"excel_file":str(excel_file),"has_questions_list":questions_list is not None,"questions_count":len(questions_list) if questions_list else 0,"prompt_template":prompt_template_name},"timestamp":int(__import__('time').time()*1000)}) + '\n')
@@ -111,10 +153,12 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
         sys.exit(1)
 
     log_print(f"📋 Using provided questions list: {len(questions_list)} questions")
-    # Normalize format - ensure tuples have 3 elements (q_num, q_text, expected_answer)
+    # Normalize: support tuple (q_num, q_text, expected_answer) or dict (multi-input)
     normalized_questions = []
     for q in questions_list:
-        if len(q) == 2:
+        if isinstance(q, dict):
+            normalized_questions.append(q)
+        elif len(q) == 2:
             normalized_questions.append((q[0], q[1], ''))
         elif len(q) == 3:
             normalized_questions.append(q)
@@ -122,10 +166,23 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
             log_print(f"   ⚠️  Skipping invalid question format: {q}")
     questions_list = normalized_questions
 
-    # Build DataFrame structure from questions list (self-contained)
-    header_data = [['Q#', 'Question', 'Received Answer', 'Expected Answer', 'Model Used', 'Pass/Fail', 'Safety Score', 'Root Cause/Explanation', 'Prompt Modification Next Version']]
-    question_data = [[q_num, q_text, '', expected_answer, '', '', '', '', ''] for q_num, q_text, expected_answer in questions_list]
-    df_new = pd.DataFrame(header_data + question_data, columns=['Q#', 'Question', 'Received Answer', 'Expected Answer', 'Model Used', 'Pass/Fail', 'Safety Score', 'Root Cause/Explanation', 'Prompt Modification Next Version'])
+    # Input columns from config (single source of truth for first tab and Running_Score)
+    input_headers, input_rows = get_input_column_headers_and_rows(config_dict)
+    outcome_columns = ['Received Answer', 'Expected Answer', 'Model Used', 'Pass/Fail', 'Safety Score', 'Root Cause/Explanation', 'Prompt Modification Next Version']
+    all_columns = input_headers + outcome_columns
+    num_input_cols = len(input_headers)
+
+    # Build DataFrame: use config-derived input rows and expected_answer from questions_list by index
+    def expected_for(q):
+        return q.get('expectedAnswer', '') if isinstance(q, dict) else (q[2] if len(q) >= 3 else '')
+
+    header_data = [all_columns]
+    question_data = []
+    for i in range(len(questions_list)):
+        input_row = input_rows[i] if i < len(input_rows) else [''] * num_input_cols
+        exp = expected_for(questions_list[i])
+        question_data.append(input_row + ['', exp, '', '', '', '', ''])
+    df_new = pd.DataFrame(header_data + question_data, columns=all_columns)
 
     # Metadata rows at top (matching V7 format)
     log_print("   🔑 Getting Salesforce credentials for metadata...")
@@ -193,20 +250,63 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
         log_print(f"   ✅ Using models from YAML config: {models_list[0]} (primary) + {len(models_list)-1} fallback(s)")
 
     log_print(f"   📝 Processing {len(questions_list)} questions...")
-    for q_num, q_text, _ in questions_list:
-        log_print(f"   ✓ {q_num}: {q_text[:60]}...")
+    for q in questions_list:
+        q_num = q.get('number', '') if isinstance(q, dict) else (q[0] if q else '')
+        q_preview = (q.get('text', '') or list((q.get('inputs') or {}).values())[:1] or [''])[0] if isinstance(q, dict) else (q[1][:60] if len(q) > 1 else '')
+        log_print(f"   ✓ {q_num}: {str(q_preview)[:60]}...")
 
     prompt_dev_name = prompt_template_name
     log_print(f"   🔧 Using prompt API name (DeveloperName): {prompt_dev_name}")
 
+    # Log GenAI prompt template active version and retriever (for traceability)
+    genai_prompt_active_version = None
+    genai_prompt_retriever = None
+    try:
+        xml_content = retrieve_metadata_via_api(instance_url, access_token, "GenAiPromptTemplate", prompt_dev_name)
+        if xml_content:
+            root = ET.fromstring(xml_content)
+            ns = {'met': 'http://soap.sforce.com/2006/04/metadata'}
+            active_el = root.find('.//met:activeVersionIdentifier', ns)
+            genai_prompt_active_version = active_el.text if active_el is not None and active_el.text else None
+            if genai_prompt_active_version:
+                for v in root.findall('.//met:templateVersions', ns):
+                    vid_el = v.find('met:versionIdentifier', ns)
+                    if vid_el is not None and vid_el.text == genai_prompt_active_version:
+                        for tdp in v.findall('met:templateDataProviders', ns):
+                            def_el = tdp.find('met:definition', ns)
+                            if def_el is not None and def_el.text and 'getEinsteinRetrieverResults' in def_el.text:
+                                genai_prompt_retriever = def_el.text.split('/')[-1] if '/' in def_el.text else def_el.text
+                                break
+                        break
+            log_print(f"   📌 GenAI prompt active version: {genai_prompt_active_version or 'unknown'}")
+            log_print(f"   📌 GenAI prompt retriever: {genai_prompt_retriever or 'unknown'}")
+        else:
+            log_print(f"   ⚠️  Could not retrieve prompt template metadata for version logging")
+    except Exception as e:
+        log_print(f"   ⚠️  Could not log GenAI prompt version: {e}")
+
     total = len(questions_list)
     all_responses = []
     log_print(f"\n   🚀 Starting prompt invocations (sequential, {total} questions)...")
-    for idx, (q_num, q_text, _) in enumerate(questions_list):
+    for idx, q in enumerate(questions_list):
+        q_num = q.get('number', '') if isinstance(q, dict) else (q[0] if q else '')
         log_print(f"\n   🔄 [{idx+1}/{total}] Invoking prompt for {q_num}...")
-        log_print(f"      Question: {q_text[:80]}...")
+        # Step 6: pass question and/or input_value_map (handled in next edit for invoke_prompt call)
+        q_text = q.get('text', '') if isinstance(q, dict) else (q[1] if len(q) > 1 else '')
+        input_value_map = (q.get('inputs') or None) if isinstance(q, dict) else None
+        if input_value_map and not any(input_value_map.values()):
+            input_value_map = None
+        if input_value_map:
+            log_print(f"      Inputs: {list(input_value_map.keys())}")
+        else:
+            log_print(f"      Question: {str(q_text)[:80]}...")
         try:
-            result, model_used = invoke_prompt(instance_url, access_token, q_text, prompt_dev_name, max_retries=3, model_used=None, models_list=models_list, run_id=config_dict.get('_run_id') or config_dict.get('run_id') if config_dict else None)
+            result, model_used = invoke_prompt(
+                instance_url, access_token, q_text or None, prompt_dev_name,
+                max_retries=3, model_used=None, models_list=models_list,
+                run_id=config_dict.get('_run_id') or config_dict.get('run_id') if config_dict else None,
+                input_value_map=input_value_map
+            )
             
             # CRITICAL: Check if job was killed/aborted
             if model_used == "ABORTED":
@@ -234,10 +334,12 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
 
     log_print("   📝 Updating DataFrame with answers...")
     df_answers = df_new.copy()
+    col_received = num_input_cols  # Received Answer
+    col_model = num_input_cols + 2  # Model Used
     for i, (q_num, answer_text, model_used) in enumerate(all_responses):
         if i < len(df_answers):
-            df_answers.iloc[i + 1, 2] = answer_text  # Received Answer
-            df_answers.iloc[i + 1, 4] = model_used  # Model Used
+            df_answers.iloc[i + 1, col_received] = answer_text
+            df_answers.iloc[i + 1, col_model] = model_used
 
     # Build final DataFrame: metadata + answers
     final_df = pd.concat([metadata_header, df_answers], ignore_index=True)
@@ -317,6 +419,12 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
     
     bottom_rows = [
         [''] * num_cols,
+        ['GenAI Prompt Active Version:', ''] + [''] * (num_cols - 2),
+        ['', (genai_prompt_active_version or 'unknown')] + [''] * (num_cols - 2),
+        [''] * num_cols,
+        ['GenAI Prompt Retriever:', ''] + [''] * (num_cols - 2),
+        ['', (genai_prompt_retriever or 'unknown')] + [''] * (num_cols - 2),
+        [''] * num_cols,
         ['LLM Parser Prompt Current:', ''] + [''] * (num_cols - 2),
         ['', llm_parser_prompt_current[:50000] if llm_parser_prompt_current else 'Not found'] + [''] * (num_cols - 2),  # Value in next row, column 1
         [''] * num_cols,
@@ -378,33 +486,25 @@ def create_analysis_sheet_with_prompts(excel_file, questions_list=None,
         import openpyxl
         wb = openpyxl.load_workbook(excel_file)
         if 'Running_Score' not in wb.sheetnames:
-            # Create new sheet at position 0 (first tab)
+            # Create new sheet at position 0 (first tab); use same input columns as analysis sheet
             ws = wb.create_sheet('Running_Score', 0)
-            questions = config_dict.get('questions', []) if config_dict else []
-            
-            # Build initial structure - match old code exactly
+            run_input_headers, run_input_rows = get_input_column_headers_and_rows(config_dict)
+            num_input_cols_run = len(run_input_headers)
+            first_run_col = num_input_cols_run + 1
+
             rows = []
-            # Row 1: Headers
-            header_row = ['Metric', ''] + ['Run 1']
+            # Row 1: Headers (Run 1 in column first_run_col)
+            header_row = ['Metric', ''] + [''] * (num_input_cols_run - 1) + ['Run 1']
             rows.append(header_row)
-            # Rows 2-10: Summary metrics
-            rows.append(['Run ID', ''])
-            rows.append(['Timestamp', ''])
-            rows.append(['Cycle', ''])
-            rows.append(['Pass', ''])
-            rows.append(['Fail', ''])
-            rows.append(['Total', ''])
-            rows.append(['Pass Rate', ''])
-            rows.append(['Avg Safety', ''])
-            rows.append(['Stage Status', ''])
+            # Rows 2-11: Summary metrics (label in col 1, value will go in first_run_col)
+            for label in ['Run ID', 'Timestamp', 'Cycle', 'Pass', 'Partial', 'Fail', 'Total', 'Pass Rate', 'Avg Safety', 'Stage Status']:
+                rows.append([label, ''] + [''] * (num_input_cols_run - 1))
             rows.append([''])  # Empty separator
-            # Row 12: Question headers (column 3 should be empty, header is only in row 1)
-            question_header = ['Q#', 'Question', '']
+            # Question block: same input column headers + empty for Run 1
+            question_header = run_input_headers + ['']
             rows.append(question_header)
-            # Rows 13+: Questions
-            for q in questions:
-                q_row = [q.get('number', ''), q.get('text', '')]
-                rows.append(q_row)
+            for input_row in run_input_rows:
+                rows.append(input_row + [''])
             
             # Write initial structure
             for row_idx, row_data in enumerate(rows, start=1):
@@ -458,77 +558,60 @@ def update_run_summary_sheet(excel_file, run_id, cycle_number, results_data, con
         # Load workbook
         wb = openpyxl.load_workbook(excel_file)
         
-        # Get questions from config
-        questions = config_dict.get('questions', [])
-        
+        # Input columns from config (same as first tab and Running_Score create)
+        run_input_headers, run_input_rows = get_input_column_headers_and_rows(config_dict)
+        num_input_cols_run = len(run_input_headers)
+        first_run_col = num_input_cols_run + 1
+
         # Check if Running_Score sheet exists
         if sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
             existing_runs = True
         else:
-            # Create new sheet at position 0 (first tab)
+            # Create new sheet at position 0 (first tab); same structure as in create_analysis_sheet
             ws = wb.create_sheet(sheet_name, 0)
             existing_runs = False
-        
+
         # Determine column index for new run/cycle
         if existing_runs:
-            # Find last data column (after Q# and Question)
-            # Check for actual DATA (row 2 = Run ID), not just headers (row 1)
-            # This is important because the sheet might have "Run 1" header but no data yet
-            last_col = 3  # Start at column 3 (first run column)
+            last_col = first_run_col
             while ws.cell(row=2, column=last_col).value is not None and str(ws.cell(row=2, column=last_col).value).strip():
                 last_col += 1
-            new_col_index = last_col  # Next available column (or column 3 if empty)
+            new_col_index = last_col
         else:
-            # First run - create structure
-            new_col_index = 3  # After Q# (col 1) and Question (col 2)
-            
-            # Build initial structure
+            new_col_index = first_run_col
             rows = []
-            # Row 0: Headers
-            header_row = ['Metric', ''] + [f"Run 1"]
+            header_row = ['Metric', ''] + [''] * (num_input_cols_run - 1) + ['Run 1']
             rows.append(header_row)
-            # Rows 1-9: Summary metrics
-            rows.append(['Run ID', ''])
-            rows.append(['Timestamp', ''])
-            rows.append(['Cycle', ''])
-            rows.append(['Pass', ''])
-            rows.append(['Fail', ''])
-            rows.append(['Total', ''])
-            rows.append(['Pass Rate', ''])
-            rows.append(['Avg Safety', ''])
-            rows.append(['Stage Status', ''])
-            rows.append([''])  # Empty separator
-            # Row 12: Question headers (column 3 should be empty, header is only in row 1)
-            question_header = ['Q#', 'Question', '']
+            for label in ['Run ID', 'Timestamp', 'Cycle', 'Pass', 'Partial', 'Fail', 'Total', 'Pass Rate', 'Avg Safety', 'Stage Status']:
+                rows.append([label, ''] + [''] * (num_input_cols_run - 1))
+            rows.append([''])
+            question_header = run_input_headers + ['']
             rows.append(question_header)
-            # Rows 11+: Questions
-            for q in questions:
-                q_row = [q.get('number', ''), q.get('text', '')]
-                rows.append(q_row)
-            
-            # Write initial structure
+            for input_row in run_input_rows:
+                rows.append(input_row + [''])
             for row_idx, row_data in enumerate(rows, start=1):
                 for col_idx, value in enumerate(row_data, start=1):
                     ws.cell(row=row_idx, column=col_idx, value=value)
-        
-        # Update header for this column
-        run_label = f"Run {new_col_index - 2}"  # Run 1, Run 2, etc.
+
+        # Update header for this column (Run 1 when new_col_index == first_run_col, etc.)
+        run_label = f"Run {new_col_index - num_input_cols_run}"
         ws.cell(row=1, column=new_col_index, value=run_label)
         
-        # Populate summary metrics (rows 2-10)
+        # Populate summary metrics (rows 2-11)
         ws.cell(row=2, column=new_col_index, value=run_id)
         ws.cell(row=3, column=new_col_index, value=results_data['timestamp'])
         ws.cell(row=4, column=new_col_index, value=cycle_number)
         ws.cell(row=5, column=new_col_index, value=results_data['pass_count'])
-        ws.cell(row=6, column=new_col_index, value=results_data['fail_count'])
-        ws.cell(row=7, column=new_col_index, value=results_data['total'])
-        ws.cell(row=8, column=new_col_index, value=f"{results_data['pass_rate']:.1f}%")
-        ws.cell(row=9, column=new_col_index, value=results_data['avg_safety'])
-        ws.cell(row=10, column=new_col_index, value=results_data['stage_status'])
+        ws.cell(row=6, column=new_col_index, value=results_data.get('partial_count', 0))
+        ws.cell(row=7, column=new_col_index, value=results_data['fail_count'])
+        ws.cell(row=8, column=new_col_index, value=results_data['total'])
+        ws.cell(row=9, column=new_col_index, value=f"{results_data['pass_rate']:.1f}%")
+        ws.cell(row=10, column=new_col_index, value=results_data['avg_safety'])
+        ws.cell(row=11, column=new_col_index, value=results_data['stage_status'])
         
-        # Populate question results (starting at row 12, which is index 11)
-        question_start_row = 12
+        # Populate question results (starting at row 13, after header row 12)
+        question_start_row = 13
         for q_result in results_data['question_results']:
             q_number = q_result['q_number']
             status = q_result['status']
@@ -536,8 +619,12 @@ def update_run_summary_sheet(excel_file, run_id, cycle_number, results_data, con
             # Find row for this question
             for row_idx in range(question_start_row, ws.max_row + 1):
                 if ws.cell(row=row_idx, column=1).value == q_number:
-                    # Set Pass/Fail
-                    cell_value = '✅ PASS' if status == 'PASS' else '❌ FAIL'
+                    if status == 'PASS':
+                        cell_value = '✅ PASS'
+                    elif status == 'PARTIAL':
+                        cell_value = '🔶 PARTIAL'
+                    else:
+                        cell_value = '❌ FAIL'
                     ws.cell(row=row_idx, column=new_col_index, value=cell_value)
                     break
         

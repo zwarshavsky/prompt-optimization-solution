@@ -1,0 +1,221 @@
+# P1: Original Simple — 3-tier scoring, NO modification rules, NO regression warning.
+# Based on the original prompt_optimization_input.yaml instructions that produced ALL 5 historically improving runs.
+# Gives Gemini freedom for bold moves including simplification.
+
+configuration:
+  salesforce:
+    username: "zwarshavsky+ritehitesdo@salesforce.com"
+    password: "YOUR_PASSWORD"
+    instanceUrl: "https://jamespark-250401-251-demo.my.salesforce.com"
+
+  projectName: "RiteHite_Opt_P1"
+
+  takeScreenshots: false
+  headless: true
+  slowMo: 0
+  geminiModel: "gemini-3-pro-preview"
+  pdfDirectory: "/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/prompt-optimization-solution/inputs/pdf/RiteHite"
+
+  promptTemplateApiName: "RiteHite_Opt_P1"
+  promptInputs:
+    - apiName: "Input:Product"
+      displayName: "Product"
+    - apiName: "Input:Question"
+      displayName: "Question"
+
+  indexPrefix: "Opt_P1"
+  searchIndexId: "18lKc000000oMyUIAU"
+  refinementStage: "llm_parser"
+  maxCycles: 5
+
+  refinementStages:
+    llm_parser:
+      description: "LLM Parser Prompt Optimization"
+      focus: |
+        **CRITICAL**: Your primary task is to optimize the **LLM Parser Prompt**. This is the FIRST and MOST IMPORTANT component to optimize.
+        We will iterate on the parser multiple times, reindex the documents, and test again until we achieve maximum improvement. Only after the parser is optimized as much as possible should we consider the response prompt template.
+      rootCauseGuidance: |
+        **ROOT CAUSE ANALYSIS REQUIREMENTS** (for each FAIL or PARTIAL):
+        1. **Word-by-Word Comparison**: Compare the generated answer to the expected answer word-by-word. Identify exactly what was found, what was missing, and what should have been found.
+        2. **Pipeline Failure Point**: Determine the EXACT failure point in the RAG pipeline:
+           - **Parser Failure**: Did the parser fail to extract structured data (tables, relationships, entities) from the source document during chunking? (Most common - focus here first)
+           - **Chunking Failure**: Did the parser extract it but create chunks that are too fragmented or lack context?
+           - **Relationship Failure**: Did the parser fail to extract relationships between entities?
+           - **Context Preservation Failure**: Did the parser lose critical context (e.g., table headers, footnotes, comparative statements)?
+           - **Response Template Issue**: Only if you can definitively prove the parser extracted the information correctly but the response template failed to use it
+        3. **PDF Location Reference**: For each failure, reference the EXACT location in the PDF (page, section, quote).
+        4. **Failure Categorization**: Table Parsing, Footnote Processing, Comparative Statement, Entity Ambiguity, Context Loss, Relationship Extraction, or Other.
+        5. **For PASS cases**: Briefly explain what parser instruction worked correctly.
+      modificationGuidance: |
+        **PROMPT MODIFICATION REQUIREMENTS**:
+        1. **Specific Prompt Text Changes**: For each failure, provide EXACT prompt text changes (new directives, modifications, examples).
+        2. **Link to Root Cause**: Each modification MUST directly address a specific root cause identified in your analysis.
+        3. **Complete Updated Prompt**: After all questions, provide the COMPLETE updated LLM parser prompt text (production-ready).
+        4. **Focus on Patterns**: One comprehensive modification for shared root causes.
+        5. **For PASS cases**: "No modification needed" with brief explanation.
+        6. **Response Template Changes**: Only suggest if parser is maximized and template clearly failed to use extracted info.
+    response_prompt:
+      description: "Response Prompt Template Optimization"
+      focus: |
+        **CRITICAL**: The LLM Parser Prompt has been optimized to its maximum potential. Your primary task is now to optimize the **Response Prompt Template**.
+      rootCauseGuidance: |
+        - **PRIMARY**: Is the response prompt template unclear? Not structuring information well? Missing context?
+        - **IGNORE**: Retrieval issues (not actionable)
+      modificationGuidance: |
+        - Provide SPECIFIC, ACTIONABLE improvements to the **Response Prompt Template**
+
+  prompt_builder_models:
+    primary: "sfdc_ai__DefaultOpenAIGPT5"
+    fallbacks: []
+
+  geminiInstructions: |
+    # CUSTOM INSTRUCTIONS
+    {{CUSTOM_INSTRUCTIONS}}
+    ---
+    # ITERATIVE REFINEMENT PROCESS
+    This is an **iterative refinement process**. This may be the first refinement cycle or a subsequent one. We will continue refining until no further improvements are possible. Each cycle involves:
+    1. Analyzing test results
+    2. Identifying optimization opportunities
+    3. Proposing improved prompts
+    4. Testing the improvements
+    5. Repeating until optimal
+    **Current Refinement Stage**: {{REFINEMENT_STAGE}}
+    # PRIMARY FOCUS: {{REFINEMENT_STAGE_DESCRIPTION}}
+    {{REFINEMENT_STAGE_FOCUS}}
+    **IMPORTANT WORKFLOW CONTEXT**: This is a **single analysis request** within a refinement cycle. Each cycle involves:
+    - **Previous steps** (already completed): Re-indexing documents (if LLM parser changed), invoking the prompt template with test questions, and collecting responses
+    - **This step** (your analysis): You are analyzing the results from the current cycle and providing recommendations
+    - **Subsequent steps** (after your analysis): Your recommendations will be implemented, and the cycle will repeat until optimal
+    You will receive **one scoring/analysis request per cycle**.
+    # TOKEN BUDGET
+    **Token Budget**: You have access to Gemini's full context window. Prioritize complete PDF analysis, full parser prompt evaluation, comprehensive test result analysis, and detailed modification recommendations with complete prompt text.
+    # CONTEXT: RAG System Architecture
+    You are analyzing a **Retrieval-Augmented Generation (RAG) system** built on Salesforce Data Cloud:
+    1. **LLM Parser Prompt**: The search index uses an **LLM parser prompt** to break documents into semantic chunks. If the parser doesn't extract information correctly, the retriever can't find it, and the response will be wrong.
+    2. **Retriever**: Searches indexed chunks and returns relevant ones. **Note: Retrieval configuration is not actionable/changeable in this workflow.**
+    3. **Response Prompt Template**: Takes retrieved chunks and synthesizes answers from the retrieved context.
+    # SOURCE DOCUMENT (PDF)
+    The PDF file has been uploaded and is available in the context above. This contains the correct answers. Use it to verify response accuracy.
+    # LLM PARSER PROMPT (CURRENT VERSION - PRIMARY FOCUS)
+    This is the prompt used by the LLM parser to break documents into chunks. **This is what we're optimizing.** Analyze whether this parser is: Missing critical information; Creating poorly structured chunks; Not extracting key relationships; Failing to preserve context; Not handling edge cases.
+    {{LLM_PARSER_PROMPT}}
+    # RESPONSE PROMPT TEMPLATE (for reference only)
+    **Current Model**: {{RESPONSE_MODEL}}
+    **Available Models**: {{AVAILABLE_MODELS}}
+    **Response Prompt Template Content**: {{RESPONSE_PROMPT_TEMPLATE}}
+    # TEST RESULTS
+    Test questions, generated answers, and expected answers: {{WORKSHEET_TEXT}}
+    # PREVIOUS CYCLE CONTEXT (if applicable)
+    If this is not the first refinement cycle, use previous results to identify regressions, persistent failures, improvements, and avoid repeating modifications that didn't work.
+    # YOUR TASK: {{REFINEMENT_STAGE_TASK}}
+    For each test result, complete these steps IN ORDER:
+    ## STEP 1: SCORE EACH RESPONSE (do this FIRST)
+    Scoring measures RETRIEVAL EFFECTIVENESS — whether the retriever surfaced relevant content.
+    Decision tree:
+    1. Response says "I don't have" / "unable to" / "cannot provide" / "do not contain"?  → ❌ FAIL
+    2. Response is about the wrong product entirely?  → ❌ FAIL
+    3. Response provides the EXACT correct values?  → ✅ PASS
+    4. Response provides substantive technical content about the right product/topic but with wrong or imprecise values?  → 🔶 PARTIAL
+    Only ❌ FAIL when: explicit refusal phrases or totally irrelevant content.
+    Apply the same criteria every cycle. Do not drift stricter or looser.
+    ## STEP 2: ROOT CAUSE ANALYSIS
+    For each question, analyze with **PRIMARY FOCUS on {{REFINEMENT_STAGE_FOCUS_TYPE}}**:
+    2a. **Safety Score** (1-10): 1 = Most conservative/safe, 10 = Most risky/hallucinatory
+    2b. **Root Cause/Explanation**: {{ROOT_CAUSE_GUIDANCE}}
+    ## STEP 3: PROMPT MODIFICATIONS
+    {{MODIFICATION_GUIDANCE}}
+    # OUTPUT FORMAT
+    Return ONLY a JSON array (one object per row), followed by a separate JSON object with the proposed prompt:
+    [
+      {
+        "Pass/Fail": "✅ PASS" or "🔶 PARTIAL" or "❌ FAIL",
+        "Safety Score": 1-10,
+        "Root Cause/Explanation": "Explanation focusing on parser issues.",
+        "Prompt Modification Next Version": "Specific actionable edit text."
+      },
+      ...
+    ]
+    {{OUTPUT_FORMAT_SECTION}}
+    **IMPORTANT**:
+    - Include "StageStatus" ("optimized" or "needs_improvement") and "StageCompleteReason" in the proposed prompt object.
+    - Set StageStatus to "optimized" ONLY when confident no further parser improvements can increase the PASS or PARTIAL count.
+    - Keep scoring consistent across cycles.
+    {{OUTPUT_FORMAT_IMPORTANT}}
+    Return ONLY the JSON array, no other text.
+
+questions:
+  - number: "Q1"
+    inputs:
+      Input:Product: "TrakLine Door"
+      Input:Question: "On a Trackline door, the black wire from the upper photo-eye receiver connects to what terminal?"
+    expectedAnswer: "It connects to terminal X11."
+  - number: "Q2"
+    inputs:
+      Input:Product: "Falcon Sensor (FasTrax/TrakLine)"
+      Input:Question: "On a falcon, where does the yellow wire connect?"
+    expectedAnswer: "It connects to Terminal 5, which is designated as \"NOT USED\"."
+  - number: "Q3"
+    inputs:
+      Input:Product: "i-COMM / Door-Commander"
+      Input:Question: "On a i-comm, what is the input setting for partial open toggle?"
+    expectedAnswer: "The input setting is 11."
+  - number: "Q4"
+    inputs:
+      Input:Product: "FasTrax Door"
+      Input:Question: "Fastrax door is slamming closed, what are the causes?"
+    expectedAnswer: "Causes include improperly set open/close limits, loose encoder components, incorrect phasing, incorrect gearbox ratio, or a released brake."
+  - number: "Q5"
+    inputs:
+      Input:Product: "Multiple Products (i-COMM / FasTrax)"
+      Input:Question: "What is the part number for a 60W power supply?"
+    expectedAnswer: "The part number is 65700012."
+  - number: "Q6"
+    inputs:
+      Input:Product: "Dock Levelers (HD-3100 / RHH-4000)"
+      Input:Question: "What is the torque on a safe-t-lip bolt with 1\" bar?"
+    expectedAnswer: "The torque range is 185 - 200 Ft-Lbs."
+  - number: "Q7"
+    inputs:
+      Input:Product: "STR-4200 Dok-Lok / Dok-Commander"
+      Input:Question: "Where do I connect a door interlock switch on a STR?"
+    expectedAnswer: "Connect it to terminal J14.2 for the overhead door open interlock, or J14.3 for the leveler stored interlock."
+  - number: "Q8"
+    inputs:
+      Input:Product: "STR-4200 Dok-Lok"
+      Input:Question: "Black wire on solenoid 3 on a STR connects to what?"
+    expectedAnswer: "Terminal J15.1."
+  - number: "Q9"
+    inputs:
+      Input:Product: "Dok-Commander (STR-4200 / GWL-2300)"
+      Input:Question: "What LED tells me if the motor overload is in fault?"
+    expectedAnswer: "The Amber LED LD50 will illuminate."
+  - number: "Q10"
+    inputs:
+      Input:Product: "RHV-4100 Vertical Leveler"
+      Input:Question: "What is the tilt back setting on a vertical leveler?"
+    expectedAnswer: "The tilt back setting is 2-1/2\" ± 1/2\"."
+  - number: "Q11"
+    inputs:
+      Input:Product: "RHV-4100 Vertical Leveler"
+      Input:Question: "What valve to adjust on RHV if leveler is drifting down?"
+    expectedAnswer: "Adjust the counterbalance (\"CB\") valve."
+  - number: "Q12"
+    inputs:
+      Input:Product: "RHR Dok-Lok"
+      Input:Question: "Part number for wiring harness on RHR?"
+    expectedAnswer: "The wiring harness is 105460 and the control harness is 18205."
+  - number: "Q13"
+    inputs:
+      Input:Product: "RHR Dok-Lok"
+      Input:Question: "Why is horn on restraint is double beeping?"
+    expectedAnswer: "It indicates a limit switch fault or that the hook did not reach the correct position."
+  - number: "Q14"
+    inputs:
+      Input:Product: "GWL-2300 Vehicle Restraint"
+      Input:Question: "What hydraulic fluid goes in the GWL?"
+    expectedAnswer: "The GWL uses MIL-H-5606 hydraulic fluid."
+  - number: "Q15"
+    inputs:
+      Input:Product: "GWL-2300 Vehicle Restraint"
+      Input:Question: "On a GWL is SW1 normally open or normally closed?"
+    expectedAnswer: "SW1 is a normally open switch."

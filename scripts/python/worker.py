@@ -57,7 +57,7 @@ def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: Dict
             "data": data,
             "timestamp": int(time.time() * 1000),
         }
-        log_path = "/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/.cursor/debug.log"
+        log_path = str(Path(__file__).resolve().parents[2] / ".cursor" / "debug.log")
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload) + "\n")
     except Exception:

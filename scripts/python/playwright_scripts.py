@@ -9,16 +9,20 @@ Currently includes:
 """
 
 import asyncio
-from playwright.async_api import async_playwright
+import json
+import os
+import platform
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
 import subprocess
-import json
 import urllib.request
 import yaml
-import os
-import psycopg2
+
+from playwright.async_api import async_playwright
+
+from worker_utils import check_run_aborted
 
 async def update_search_index_prompt(
     username: str,
@@ -35,6 +39,12 @@ async def update_search_index_prompt(
 ):
     """
     Update the LLM parser prompt for a Search Index.
+
+    .. deprecated::
+        Due to platform stability issues with the Edit Index UI flow, this flow is being
+        replaced. Future cycles will use: create Search Index → create Retriever →
+        Activate (Playwright) + update prompt template (REST API). This function remains
+        for Cycle 1 (baseline) when an existing index/retriever is configured in YAML.
     
     Args:
         username: Salesforce username
@@ -60,22 +70,9 @@ async def update_search_index_prompt(
     
     def should_abort():
         """Check DB status for kill; return True to abort if not running."""
-        if not run_id:
-            return False
-        try:
-            url = os.environ.get("DATABASE_URL")
-            if not url:
-                return False
-            conn = psycopg2.connect(url)
-            cur = conn.cursor()
-            cur.execute("select status from runs where run_id=%s", (run_id,))
-            row = cur.fetchone()
-            conn.close()
-            if row and row[0] not in ('running', 'queued', 'interrupted'):
-                print(f"   ❌ Kill detected for run {run_id} (status={row[0]}), aborting Playwright flow.")
-                return True
-        except Exception as e:
-            print(f"   ⚠️ Kill check failed: {e}")
+        if check_run_aborted(run_id):
+            print(f"   ❌ Kill detected for run {run_id}, aborting Playwright flow.")
+            return True
         return False
     
     async with async_playwright() as p:
@@ -1858,6 +1855,616 @@ async def update_search_index_prompt(
             print("\n❌ FAILED! Could not update prompt.")
         
         return save_clicked and status_check_success
+
+
+# =============================================================================
+# New pipeline: Create Index + Retriever (Cycle 2+)
+# =============================================================================
+
+def _index_full_name(version):
+    """Return the index name as-is. Caller (get_next_index_name) is responsible for producing the full name."""
+    return (version or "").strip()
+
+
+async def _create_search_index_ui(username, password, instance_url, index_name, parser_prompt, state_dir, run_id, headless, should_abort, access_token=None):
+    """Create Search Index via Playwright. Returns (index_id, full_index_name). Uses API lookup by name (no URL extraction)."""
+    base = instance_url.rstrip("/")
+    login_url = "https://login.salesforce.com" if "salesforce.com" in base else base
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless, slow_mo=100)
+        context = await browser.new_context(viewport={"width": 1280, "height": 720})
+        page = await context.new_page()
+        if should_abort():
+            print("   ⚠️ DIAG: Abort at start (before login)", flush=True)
+            await browser.close()
+            return (None, None)
+        print("   [create_index] Logging in...", flush=True)
+        await page.goto(login_url, wait_until="networkidle", timeout=60000)
+        await page.get_by_role("textbox", name="Username").fill(username)
+        await page.get_by_role("textbox", name="Password").fill(password)
+        await page.get_by_role("button", name="Log In").click()
+        await page.wait_for_url(f"**{base.split('//')[1]}**", timeout=60000)
+        if should_abort():
+            print("   ⚠️ DIAG: Abort after login, before Search Indexes", flush=True)
+            await browser.close()
+            return (None, None)
+        print("   [create_index] Navigate to Search Indexes...", flush=True)
+        await page.get_by_role("button", name="Show more navigation items").click()
+        await page.get_by_role("menuitem", name="Search Indexes").click()
+        await page.wait_for_load_state("domcontentloaded", timeout=20000)
+        await asyncio.sleep(1)
+        print("   [create_index] Waiting for New button...", flush=True)
+        new_btn = page.get_by_role("button", name="New")
+        await new_btn.wait_for(state="visible", timeout=25000)
+        print("   [create_index] New→Advanced Setup→Next (builder popup)...", flush=True)
+        await new_btn.click()
+        await asyncio.sleep(0.5)
+        await page.get_by_text("Advanced Setup", exact=True).click()
+        await asyncio.sleep(0.3)
+        async with page.expect_popup(timeout=45000) as popup_info:
+            await page.get_by_role("button", name="Next").click()
+        builder = await popup_info.value
+        await builder.wait_for_load_state("domcontentloaded")
+        await asyncio.sleep(1)
+        print("   [create_index] Builder opened. Hybrid + RagFileUDMO...", flush=True)
+        hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
+        await hybrid_btn.wait_for(state="visible", timeout=15000)
+        await hybrid_btn.click()
+        await asyncio.sleep(0.5)
+        searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
+        await searchbox.wait_for(state="visible", timeout=15000)
+        await searchbox.fill("rag")
+        await asyncio.sleep(2.5)
+        row_with_dmo = builder.locator("tr").filter(has_text="RagFileUDMO")
+        try:
+            await row_with_dmo.locator("label.slds-radio__label, .slds-radio__label").first.click(timeout=12000)
+        except Exception:
+            await row_with_dmo.locator("input[type='radio']").first.click(force=True, timeout=8000)
+        await asyncio.sleep(0.5)
+        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)
+        for parser_label in ["LLM-based Parser", "LLM Parser"]:
+            loc = builder.get_by_text(parser_label, exact=True)
+            if await loc.is_visible():
+                await loc.click()
+                break
+        else:
+            await builder.get_by_text("LLM", exact=False).first.click()
+        await asyncio.sleep(0.5)
+        textarea = builder.locator("textarea[name='prompt']").first
+        await textarea.wait_for(state="visible", timeout=10000)
+        await textarea.fill(parser_prompt)
+        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)
+        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)
+        pdf_row = builder.locator("tr").filter(has_text="pdf").first
+        await pdf_row.wait_for(state="visible", timeout=12000)
+        await pdf_row.click()
+        await asyncio.sleep(1)
+        chunk_inputs = builder.locator("input[type='number'], input[inputmode='numeric'], [role='spinbutton']")
+        await chunk_inputs.nth(0).wait_for(state="visible", timeout=10000)
+        # Max Tokens
+        max_tokens_input = chunk_inputs.nth(0)
+        await max_tokens_input.click()
+        await max_tokens_input.fill("")
+        await max_tokens_input.type("8000")
+        await max_tokens_input.press("Tab")
+        await asyncio.sleep(0.3)
+        # Overlap Tokens — use click+clear+type+Tab to trigger change detection
+        overlap_input = chunk_inputs.nth(1)
+        await overlap_input.click()
+        await overlap_input.fill("")
+        await overlap_input.type("512")
+        await overlap_input.press("Tab")
+        await asyncio.sleep(0.3)
+        save_btn = builder.get_by_role("table").get_by_role("button", name="Save")
+        if await save_btn.is_visible():
+            await save_btn.click()
+            await asyncio.sleep(1)
+        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)
+        emb_dropdown = builder.get_by_label("Select embedding Model").or_(builder.get_by_label("Select embedding Models"))
+        if await emb_dropdown.count() > 0:
+            await emb_dropdown.first.click()
+            await asyncio.sleep(0.3)
+            await builder.get_by_text("Salesforce Embedding V2 Small", exact=True).click()
+        else:
+            for model_name in ["Salesforce Embedding V2 Small", "Embedding V2 Small", "V2 Small"]:
+                loc = builder.get_by_text(model_name, exact=False)
+                if await loc.count() > 0:
+                    await loc.first.click()
+                    break
+        await asyncio.sleep(0.3)
+        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)
+        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)
+        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)
+        for name_sel in [("textbox", "Search Index Configuration Name"), ("textbox", "Configuration Name"), ("textbox", "Name")]:
+            inp = builder.get_by_role(name_sel[0], name=name_sel[1])
+            if await inp.count() > 0:
+                await inp.first.fill(index_name, timeout=10000)
+                break
+        else:
+            await builder.locator("input[type='text']").last.fill(index_name, timeout=10000)
+        await builder.get_by_role("button", name="Save").click()
+        redirect_ok = False
+        try:
+            await builder.wait_for_url("**/DataSemanticSearch/**", timeout=90000)
+            redirect_ok = True
+        except Exception:
+            try:
+                await builder.wait_for_url("**searchIndex**", timeout=15000)
+                redirect_ok = True
+            except Exception:
+                pass
+        if not redirect_ok:
+            builder_url = builder.url or ""
+            print(f"   ❌ Save did NOT redirect to detail page — index was NOT created. URL: {builder_url[:120]}", flush=True)
+            print("   ⚠️ Common cause: index name starts with a digit (Salesforce requires letter prefix)", flush=True)
+            await browser.close()
+            return (None, None)
+        print("   [create_index] Save complete; looking up index ID via API...", flush=True)
+        await asyncio.sleep(3)
+        full_name = _index_full_name(index_name)
+        await browser.close()
+        from salesforce_api import get_salesforce_credentials, find_index_id_by_name
+        if not access_token:
+            _, access_token = get_salesforce_credentials(username=username, password=password, instance_url=instance_url)
+        index_id = find_index_id_by_name(instance_url, access_token, index_name, max_attempts=8, retry_delay_seconds=10)
+        if not index_id:
+            print("   ⚠️ API lookup failed: index not found in list_indexes after create (8 attempts / 80s)", flush=True)
+        if index_id:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            fn = state_dir / (f"run_{run_id}_latest_index.json" if run_id else "latest_index.json")
+            fn.write_text(json.dumps({"indexId": index_id, "indexName": full_name}, indent=2), encoding="utf-8")
+            print(f"   Saved {fn.name}", flush=True)
+        return (index_id, full_name if index_id else None)
+
+
+async def _create_retriever_ui(username, password, instance_url, index_name, state_dir, run_id, headless, should_abort):
+    """Create Retriever via Playwright. Returns (retriever_display_name, activate_clicked)."""
+    base = instance_url.rstrip("/")
+    login_url = "https://login.salesforce.com" if "salesforce.com" in base else base
+    retriever_name = f"{index_name} Retriever {datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
+    delay = 0.5
+
+    def _valid(label, value):
+        v = (value or "").strip().lower()
+        if not v or "select a field" in v:
+            return False
+        if label == "Chunk":
+            return "chunk" in v or "grounding source" in v or "> chunk" in v
+        if label == "SourceRecordId":
+            return "source record id" in v or "reference id" in v
+        if label == "DataSource":
+            return "data source" in v and "object" not in v
+        if label == "DataSourceObject":
+            return "data source ob" in v
+        return True
+
+    async def _click_add(frame):
+        for loc in [frame.locator("text=Fields to Return").locator("..").locator("text=Add Field"), frame.locator("text=Add Field")]:
+            try:
+                if await loc.count() > 0:
+                    await loc.first.scroll_into_view_if_needed(timeout=3000)
+                    await loc.first.click(timeout=5000, force=True)
+                    await asyncio.sleep(0.5)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless, slow_mo=100)
+        context = await browser.new_context(viewport={"width": 1280, "height": 720})
+        page = await context.new_page()
+        if should_abort():
+            await browser.close()
+            return ("", False)
+        await page.goto(login_url, wait_until="networkidle", timeout=60000)
+        await page.get_by_role("textbox", name="Username").fill(username)
+        await page.get_by_role("textbox", name="Password").fill(password)
+        await page.get_by_role("button", name="Log In").click()
+        await page.wait_for_url(f"**{base.split('//')[1]}**", timeout=60000)
+        if should_abort():
+            await browser.close()
+            return ("", False)
+        await page.get_by_role("button", name="Show more navigation items").click()
+        await page.get_by_role("menuitem", name="Einstein Studio").click()
+        await page.wait_for_load_state("domcontentloaded", timeout=15000)
+        await asyncio.sleep(1.5)
+        await page.get_by_role("link", name="Retrievers").click()
+        await page.wait_for_load_state("domcontentloaded", timeout=15000)
+        await asyncio.sleep(1)
+        await page.get_by_role("button", name="New Retriever").click()
+        await asyncio.sleep(0.5)
+        async with page.expect_popup(timeout=45000) as popup_info:
+            await page.get_by_role("button", name="Next").click()
+        popup = await popup_info.value
+        await popup.wait_for_load_state("domcontentloaded")
+        await asyncio.sleep(1)
+        await popup.get_by_text("Data Cloud", exact=True).click()
+        await asyncio.sleep(0.3)
+        await popup.get_by_role("button", name="Next").click()
+        await asyncio.sleep(0.5)
+        dmo_combobox = popup.get_by_role("combobox", name="Select a data model object")
+        for _attempt in range(60):
+            if await dmo_combobox.is_enabled():
+                break
+            await asyncio.sleep(1)
+        await dmo_combobox.click()
+        rag_option = popup.get_by_text("RagFileUDMO", exact=True).first
+        await rag_option.wait_for(state="visible", timeout=30000)
+        await rag_option.click()
+        await asyncio.sleep(0.5)
+        await popup.get_by_role("combobox", name="Data model object's search").click()
+        idx_option = popup.get_by_text(index_name, exact=False).first
+        await idx_option.wait_for(state="visible", timeout=30000)
+        await idx_option.click()
+        await asyncio.sleep(0.3)
+        await popup.get_by_role("button", name="Next").click()
+        await asyncio.sleep(0.5)
+        await popup.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)
+        cfg_frame = popup
+        for f in [popup] + list(popup.frames):
+            try:
+                if await f.locator("text=Add Field").count() > 0:
+                    cfg_frame = f
+                    break
+            except Exception:
+                continue
+        await cfg_frame.locator("text=Add Field").first.wait_for(state="visible", timeout=15000)
+        await asyncio.sleep(0.5)
+        field_specs = [
+            ("Chunk", "chunk", "Chunk", False),
+            ("SourceRecordId", "source record", "Source Record Id", False),
+            ("DataSource", "data source", "Data Source", False),
+            ("DataSourceObject", "data source object", "Data Source Object", True),
+        ]
+        for fi, (label_text, filter_text, display_label, check_cb) in enumerate(field_specs):
+            if should_abort():
+                await browser.close()
+                return ("", False)
+            empty_labels = cfg_frame.locator("input[placeholder*='Enter a field label']")
+            label_input = empty_labels.last if await empty_labels.count() > 0 else cfg_frame.get_by_role("textbox", name="Field Label").last
+            row = label_input.locator("xpath=ancestor::*[.//input[contains(@placeholder,'Select a field')]][1]")
+            await label_input.wait_for(state="visible", timeout=15000)
+            combo = row.locator("input[placeholder*='Select a field']").first
+            await label_input.fill(display_label, timeout=10000)
+            await asyncio.sleep(delay)
+            await combo.click()
+            await asyncio.sleep(0.3)
+            await combo.fill(filter_text)
+            await asyncio.sleep(delay * 2)
+            dropdown = cfg_frame.locator(".slds-dropdown:visible, [role='listbox']:visible").last
+            try:
+                await dropdown.wait_for(state="visible", timeout=8000)
+            except Exception:
+                dropdown = cfg_frame.locator(".slds-dropdown, [role='listbox']").last
+            for _loc in [dropdown.get_by_text("Related Attributes", exact=True), dropdown.get_by_role("option", name="Related Attributes")]:
+                try:
+                    if await _loc.count() > 0:
+                        await _loc.first.click(timeout=6000)
+                        break
+                except Exception:
+                    continue
+            await asyncio.sleep(delay)
+            try:
+                chunk_node = dropdown.get_by_text(f"{index_name} chunk", exact=False).or_(dropdown.get_by_text("chunk", exact=False))
+                if await chunk_node.count() > 0:
+                    await chunk_node.first.click(timeout=3000)
+            except Exception:
+                pass
+            await asyncio.sleep(delay)
+            dd_visible = await cfg_frame.locator(".slds-dropdown:visible, [role='listbox']:visible").count()
+            if dd_visible > 0:
+                dropdown = cfg_frame.locator(".slds-dropdown:visible, [role='listbox']:visible").last
+                for loc in [dropdown.get_by_text(display_label, exact=True), dropdown.get_by_role("option", name=display_label)]:
+                    try:
+                        ct = await loc.count()
+                        if ct > 0:
+                            await loc.last.click(timeout=4000)
+                            print(f"   [retriever] Field '{display_label}' selected (count={ct})", flush=True)
+                            break
+                    except Exception:
+                        continue
+                await asyncio.sleep(delay)
+            else:
+                try:
+                    await combo.click(timeout=3000)
+                    await asyncio.sleep(delay)
+                    await combo.fill(filter_text)
+                    await asyncio.sleep(delay * 2)
+                    dropdown = cfg_frame.locator(".slds-dropdown:visible, [role='listbox']:visible").last
+                    await dropdown.wait_for(state="visible", timeout=5000)
+                    for loc in [dropdown.get_by_text(display_label, exact=True), dropdown.get_by_role("option", name=display_label)]:
+                        try:
+                            if await loc.count() > 0:
+                                await loc.last.click(timeout=4000)
+                                print(f"   [retriever] Field '{display_label}' selected after reopen", flush=True)
+                                break
+                        except Exception:
+                            continue
+                    await asyncio.sleep(delay)
+                except Exception as e:
+                    print(f"   [retriever] WARNING: Field '{display_label}' selection failed: {e}", flush=True)
+            if check_cb:
+                try:
+                    await row.locator(".slds-checkbox_faux").first.click(timeout=3000)
+                except Exception:
+                    pass
+            if fi < len(field_specs) - 1:
+                await _click_add(cfg_frame)
+            await asyncio.sleep(delay)
+        for loc in [cfg_frame.get_by_role("switch", name="Enable Citations"), cfg_frame.get_by_text("Enable Citations").locator("..").locator("input, [role='switch']")]:
+            try:
+                if await loc.count() > 0:
+                    await loc.first.click(timeout=2000)
+                    break
+            except Exception:
+                continue
+        await cfg_frame.get_by_role("button", name="Next").or_(popup.get_by_role("button", name="Next")).first.click(force=True)
+        await asyncio.sleep(2.5)
+        if "configureretriever" in (popup.url or "").lower():
+            await popup.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
+        # Find best frame for Einstein Studio (content may be in iframe)
+        def _get_root():
+            frames = list(getattr(popup, "frames", []))
+            if len(frames) > 1:
+                for f in frames[1:]:
+                    if "Retriever" in (f.url or "") or "einstein" in (f.url or "").lower():
+                        return f
+            return popup
+        ctx = _get_root()
+        pages_before = set(context.pages) if hasattr(context, "pages") else set()
+        save_clicked = False
+        for target in [ctx, popup, cfg_frame] + [f for f in list(getattr(popup, "frames", [])) if f != popup]:
+            for btn_loc in [
+                target.get_by_role("button", name="Save"),
+                target.get_by_role("button", name="Save Retriever"),
+                target.get_by_text("Save", exact=True),
+                target.get_by_text("Save Retriever", exact=True),
+                target.locator("button").filter(has_text="Save"),
+                target.locator("lightning-button:has-text('Save') >> button"),
+            ]:
+                try:
+                    if await btn_loc.count() > 0:
+                        await btn_loc.first.scroll_into_view_if_needed(timeout=3000)
+                        await btn_loc.first.click(timeout=8000)
+                        save_clicked = True
+                        break
+                except Exception:
+                    continue
+            if save_clicked:
+                break
+        await asyncio.sleep(2)
+        candidates = [popup] + (list(set(context.pages) - pages_before) if hasattr(context, "pages") else [popup])
+        # Wait for modal to be interactive (Save button enabled, up to 30s)
+        modal_ready = False
+        for _ in range(60):
+            await asyncio.sleep(0.5)
+            for pg in candidates:
+                for target in [pg] + list(getattr(pg, "frames", [])):
+                    try:
+                        dialog_save = target.get_by_role("dialog").get_by_role("button", name="Save")
+                        if await dialog_save.count() > 0:
+                            dis = await dialog_save.first.get_attribute("disabled")
+                            if dis is None or dis == "false":
+                                modal_ready = True
+                                break
+                    except Exception:
+                        pass
+                if modal_ready:
+                    break
+            if modal_ready:
+                break
+        name_locators = [
+            ("textbox Name", lambda t: t.get_by_role("textbox", name="Name")),
+            ("textbox * Name", lambda t: t.get_by_role("textbox", name=re.compile(r"^[\s*]*Name$", re.I))),
+            ("label Retriever Name", lambda t: t.get_by_label("Retriever Name")),
+            ("label Name", lambda t: t.get_by_label("Name")),
+            ("dialog input", lambda t: t.get_by_role("dialog").locator("input[type='text']").first),
+            ("dialog input first", lambda t: t.locator("[role='dialog'] input").first),
+        ]
+        name_filled = False
+        max_fill_attempts = 3
+        if save_clicked:
+            for fill_attempt in range(max_fill_attempts):
+                for pg in candidates:
+                    for target in [pg] + list(getattr(pg, "frames", [])):
+                        for _desc, loc_fn in name_locators:
+                            try:
+                                loc = loc_fn(target)
+                                if await loc.count() > 0:
+                                    inp = loc.first
+                                    await inp.wait_for(state="visible", timeout=3000)
+                                    await inp.click()
+                                    await asyncio.sleep(0.15)
+                                    mod = "Meta" if platform.system() == "Darwin" else "Control"
+                                    await inp.press(f"{mod}+a")
+                                    await inp.fill(retriever_name, timeout=5000)
+                                    got = (await inp.input_value()).strip()
+                                    if got != retriever_name:
+                                        raise RuntimeError(f"Fill attempt {fill_attempt + 1}: expected {retriever_name!r}, got {got!r}")
+                                    name_filled = True
+                                    break
+                            except Exception:
+                                continue
+                        if name_filled:
+                            break
+                    if name_filled:
+                        break
+                if name_filled:
+                    break
+                await asyncio.sleep(1)
+            if not name_filled:
+                for pg in candidates:
+                    try:
+                        filled = await pg.evaluate("""(name) => {
+                            function* walk(root, d) {
+                                if (!root || d > 18) return;
+                                for (const el of root.querySelectorAll('*')) {
+                                    yield el;
+                                    if (el.shadowRoot) yield* walk(el.shadowRoot, d + 1);
+                                }
+                            }
+                            for (const el of walk(document, 0)) {
+                                const lbl = (el.getAttribute('data-label') || el.getAttribute('aria-label') || el.getAttribute('label') || '').toLowerCase();
+                                const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+                                if (lbl.includes('name') || ph.includes('retriever')) {
+                                    const inp = el.tagName === 'INPUT' ? el : el.querySelector('input');
+                                    if (inp) {
+                                        inp.focus();
+                                        inp.value = name;
+                                        inp.dispatchEvent(new Event('input', { bubbles: true }));
+                                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+                                        return true;
+                                    }
+                                }
+                            }
+                            return false;
+                        }""", retriever_name)
+                        if filled:
+                            name_filled = True
+                            break
+                    except Exception:
+                        continue
+        if not name_filled:
+            await browser.close()
+            raise RuntimeError("Could not fill Retriever Name in popup.")
+        for pg in [popup] + list(getattr(popup, "frames", [])):
+            try:
+                ds = pg.get_by_role("dialog").get_by_role("button", name="Save")
+                if await ds.count() > 0:
+                    await ds.first.click(timeout=5000)
+                    break
+            except Exception:
+                pass
+        for _ in range(30):
+            if "configureretriever" not in (popup.url or "").lower() and "review" not in (popup.url or "").lower():
+                break
+            await asyncio.sleep(0.5)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        fn = state_dir / (f"run_{run_id}_latest_retriever.json" if run_id else "latest_retriever.json")
+        fn.write_text(json.dumps({"retrieverName": retriever_name, "indexName": index_name, "createdAt": datetime.now().isoformat()}, indent=2), encoding="utf-8")
+        for _ in range(20):
+            for target in [popup, cfg_frame] + list(getattr(popup, "frames", [])):
+                btn = target.get_by_role("button", name="Activate").or_(target.get_by_text("Activate", exact=True))
+                if await btn.count() > 0 and await btn.first.is_visible():
+                    break
+            else:
+                await asyncio.sleep(1)
+                continue
+            break
+        activate_clicked = False
+        for target in [popup, cfg_frame] + list(getattr(popup, "frames", [])):
+            for btn in [target.get_by_role("button", name="Activate"), target.get_by_text("Activate", exact=True)]:
+                try:
+                    if await btn.count() > 0 and await btn.first.is_visible():
+                        await btn.first.click(timeout=5000)
+                        activate_clicked = True
+                        for t in [popup] + list(getattr(popup, "frames", [])):
+                            try:
+                                mb = t.get_by_role("dialog").get_by_role("button", name="Activate")
+                                if await mb.count() > 0:
+                                    await mb.first.click(timeout=5000)
+                                    break
+                            except Exception:
+                                pass
+                        break
+                except Exception:
+                    continue
+            if activate_clicked:
+                break
+        await browser.close()
+        return (retriever_name, activate_clicked)
+
+
+async def run_new_index_pipeline(
+    username, password, instance_url, prompt_template_api_name, previous_cycle_prompt,
+    state_dir, run_id=None, headless=False, index_prefix=None
+):
+    """
+    Full Cycle 2+ pipeline: Create Index → Poll → Create Retriever → Poll retriever → Update prompt template.
+    Returns (new_search_index_id, new_retriever_api_name) or (None, None) on failure/abort.
+    index_prefix: pipeline-specific prefix like "Opt_P1" (defaults to legacy global name).
+    """
+    from salesforce_api import (
+        get_salesforce_credentials, get_next_index_name, poll_index_until_ready,
+        poll_retriever_until_activated, update_genai_prompt_with_retriever,
+    )
+
+    def should_abort():
+        return bool(run_id and check_run_aborted(run_id))
+
+    _, access_token = get_salesforce_credentials(username=username, password=password, instance_url=instance_url)
+    if not index_prefix:
+        raise ValueError("indexPrefix is required in YAML configuration. No hardcoded fallback.")
+    if index_prefix[0].isdigit():
+        raise ValueError(f"indexPrefix '{index_prefix}' starts with a digit. Salesforce developer names must start with a letter.")
+    index_name = get_next_index_name(instance_url, access_token, base_name=index_prefix)
+    print(f"\n   Creating Search Index: {index_name}", flush=True)
+    try:
+        index_id, full_index_name = await _create_search_index_ui(
+            username, password, instance_url, index_name, previous_cycle_prompt,
+            state_dir, run_id, headless, should_abort, access_token=access_token
+        )
+    except Exception as e:
+        import traceback
+        print(f"   ❌ Create index failed: {e}", flush=True)
+        print("   Traceback:", flush=True)
+        traceback.print_exc()
+        latest = state_dir / (f"run_{run_id}_latest_index.json" if run_id else "latest_index.json")
+        if latest.exists():
+            try:
+                d = json.loads(latest.read_text(encoding="utf-8"))
+                idx = d.get("indexId")
+                if idx:
+                    print(f"   ⚠️ Partial failure: Index ID {idx} created - manual cleanup may be needed.", flush=True)
+            except Exception:
+                pass
+        raise
+
+    if not index_id or should_abort():
+        if should_abort():
+            print("   ⚠️ DIAG: Pipeline stopped - run aborted (user cancelled or status changed)", flush=True)
+        else:
+            print("   ⚠️ DIAG: Pipeline stopped - create_search_index returned no index_id (API lookup failed)", flush=True)
+        return (None, None)
+    print(f"   Polling index until Ready...", flush=True)
+    if not poll_index_until_ready(index_id, instance_url, access_token, run_id=run_id):
+        return (None, None)
+    print(f"   Creating Retriever...", flush=True)
+    try:
+        retriever_display_name, _ = await _create_retriever_ui(
+            username, password, instance_url, full_index_name, state_dir, run_id, headless, should_abort
+        )
+    except Exception as e:
+        print(f"   ❌ Create retriever failed: {e}", flush=True)
+        print(f"   ⚠️ Index ID {index_id} - manual cleanup may be needed.", flush=True)
+        raise
+
+    if not retriever_display_name or should_abort():
+        return (None, None)
+    print(f"   Polling retriever until activated...", flush=True)
+    retriever_api_name, retriever_label = poll_retriever_until_activated(
+        instance_url, access_token, retriever_display_name, run_id=run_id
+    )
+    if not retriever_api_name:
+        return (None, None)
+    print(f"   Updating prompt template with retriever...", flush=True)
+    if not update_genai_prompt_with_retriever(
+        instance_url, access_token, prompt_template_api_name, retriever_api_name, retriever_label or retriever_display_name
+    ):
+        return (None, None)
+    print(f"   ✅ Pipeline complete. New index: {index_id}, retriever: {retriever_api_name}", flush=True)
+    return (index_id, retriever_api_name)
+
 
 if __name__ == "__main__":
     # Parse command line arguments

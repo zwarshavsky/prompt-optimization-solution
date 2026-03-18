@@ -427,3 +427,31 @@ def get_job_status(run_id: str) -> Optional[str]:
     finally:
         conn.close()
 
+
+def check_run_aborted(run_id: Optional[str]) -> bool:
+    """Return True if the run should be aborted (e.g. user cancelled or job failed).
+
+    Call this at key points in Playwright, poll_index, retriever poll, and before Gemini
+    to stop work when the user has cancelled the run. When run_id is None or there is
+    no database connection, returns False (no abort).
+    """
+    if not run_id:
+        return False
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM runs WHERE run_id = %s", (run_id,))
+            row = cur.fetchone()
+            status = row[0] if row else None
+            # Abort if status is anything other than running/queued/interrupted
+            if status and status not in ('running', 'queued', 'interrupted'):
+                return True
+            return False
+    except Exception as e:
+        print(f"Error checking run abort for {run_id}: {e}", flush=True)
+        return False
+    finally:
+        conn.close()
+
