@@ -30,7 +30,7 @@ def log_print(*args, **kwargs):
     print(*args, **kwargs, flush=True)
 
 # Agent debug logging (do not remove until post-fix verification)
-DEBUG_LOG_PATH = "/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/.cursor/debug.log"
+DEBUG_LOG_PATH = str(Path(__file__).resolve().parents[2] / ".cursor" / "debug.log")
 # Marker for stdout logs (Heroku)
 DEBUG_STDOUT_MARKER = "DEBUG_INVOCATION"
 
@@ -992,12 +992,13 @@ class SearchIndexAPI:
         return self.create_index(payload)
 
 
-def get_next_index_name(instance_url: str, access_token: str, base_name: str = "RagFileUDMO_LLM_Parse_SFR_V") -> str:
-    """Return next V{n} name from API. If no V* indexes exist, starts with V2."""
+def get_next_index_name(instance_url: str, access_token: str, base_name: str) -> str:
+    """Return next V{n} name using base_name prefix. Scans existing indexes matching {base_name}_V(\\d+)."""
     try:
         api = SearchIndexAPI(instance_url, access_token)
         details = api.list_indexes().get("semanticSearchDefinitionDetails") or []
-        pattern = re.compile(r"RagFileUDMO_LLM_Parse_SFR_V(\d+)", re.I)
+        escaped = re.escape(base_name)
+        pattern = re.compile(rf"{escaped}_V(\d+)", re.I)
         versions = []
         for d in details:
             name = d.get("developerName") or d.get("label") or ""
@@ -1005,10 +1006,12 @@ def get_next_index_name(instance_url: str, access_token: str, base_name: str = "
             if m:
                 versions.append(int(m.group(1)))
         next_v = max(versions) + 1 if versions else 2
-        return f"RagFileUDMO_LLM_Parse_SFR_V{next_v}"
+        result = f"{base_name}_V{next_v}"
+        log_print(f"   [index-naming] prefix='{base_name}' found versions={sorted(versions)} → {result}")
+        return result
     except Exception as e:
         log_print(f"   ⚠️ Could not list indexes for name: {e}")
-        return "RagFileUDMO_LLM_Parse_SFR_V2"
+        return f"{base_name}_V2"
 
 
 def find_index_id_by_name(
@@ -1088,7 +1091,7 @@ def poll_index_until_ready(
     index_id: str,
     instance_url: str,
     access_token: str,
-    timeout_seconds: int = 7200,  # 2 hours (runs can take ~1hr 6m)
+    timeout_seconds: int = 0,  # 0 = no timeout; index builds with LLM parsing can exceed 2 hours
     poll_interval: int = 10,
     run_id: Optional[str] = None,
 ) -> bool:
@@ -1104,7 +1107,7 @@ def poll_index_until_ready(
             return False
 
         elapsed = time.time() - start
-        if elapsed > timeout_seconds:
+        if timeout_seconds > 0 and elapsed > timeout_seconds:
             log_print(f"   ⏱️ Timeout after {timeout_seconds}s waiting for index Ready")
             return False
 

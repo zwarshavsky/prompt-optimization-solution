@@ -1862,12 +1862,8 @@ async def update_search_index_prompt(
 # =============================================================================
 
 def _index_full_name(version):
-    v = (version or "").strip()
-    if v.upper().startswith("RAGFILEUDMO"):
-        return v
-    if v.upper().startswith("V"):
-        return f"RagFileUDMO_LLM_Parse_SFR_{v}"
-    return f"RagFileUDMO_LLM_Parse_SFR_V{v}"
+    """Return the index name as-is. Caller (get_next_index_name) is responsible for producing the full name."""
+    return (version or "").strip()
 
 
 async def _create_search_index_ui(username, password, instance_url, index_name, parser_prompt, state_dir, run_id, headless, should_abort, access_token=None):
@@ -2004,10 +2000,10 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
                 redirect_ok = True
             except Exception:
                 pass
-        builder_url = builder.url or ""
-        if not redirect_ok and "mode=new" in builder_url:
-            print("   ❌ Save did NOT complete - builder URL still shows mode=new (redirect never happened)", flush=True)
-            print(f"   ⚠️ Possible: validation error, Save button disabled, or UI stalled. URL: {builder_url[:100]}...", flush=True)
+        if not redirect_ok:
+            builder_url = builder.url or ""
+            print(f"   ❌ Save did NOT redirect to detail page — index was NOT created. URL: {builder_url[:120]}", flush=True)
+            print("   ⚠️ Common cause: index name starts with a digit (Salesforce requires letter prefix)", flush=True)
             await browser.close()
             return (None, None)
         print("   [create_index] Save complete; looking up index ID via API...", flush=True)
@@ -2017,9 +2013,9 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
         from salesforce_api import get_salesforce_credentials, find_index_id_by_name
         if not access_token:
             _, access_token = get_salesforce_credentials(username=username, password=password, instance_url=instance_url)
-        index_id = find_index_id_by_name(instance_url, access_token, index_name)
+        index_id = find_index_id_by_name(instance_url, access_token, index_name, max_attempts=8, retry_delay_seconds=10)
         if not index_id:
-            print("   ⚠️ API lookup failed: index not found in list_indexes after create", flush=True)
+            print("   ⚠️ API lookup failed: index not found in list_indexes after create (8 attempts / 80s)", flush=True)
         if index_id:
             state_dir.mkdir(parents=True, exist_ok=True)
             fn = state_dir / (f"run_{run_id}_latest_index.json" if run_id else "latest_index.json")
@@ -2141,6 +2137,7 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
             await label_input.fill(display_label, timeout=10000)
             await asyncio.sleep(delay)
             await combo.click()
+            await asyncio.sleep(0.3)
             await combo.fill(filter_text)
             await asyncio.sleep(delay * 2)
             dropdown = cfg_frame.locator(".slds-dropdown:visible, [role='listbox']:visible").last
@@ -2150,23 +2147,51 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
                 dropdown = cfg_frame.locator(".slds-dropdown, [role='listbox']").last
             for _loc in [dropdown.get_by_text("Related Attributes", exact=True), dropdown.get_by_role("option", name="Related Attributes")]:
                 try:
-                    await _loc.first.click(timeout=6000)
-                    break
+                    if await _loc.count() > 0:
+                        await _loc.first.click(timeout=6000)
+                        break
                 except Exception:
                     continue
+            await asyncio.sleep(delay)
             try:
-                chunk_row = dropdown.get_by_text(f"{index_name} chunk", exact=False).or_(dropdown.get_by_text("chunk", exact=False))
-                await chunk_row.first.click(timeout=3000)
+                chunk_node = dropdown.get_by_text(f"{index_name} chunk", exact=False).or_(dropdown.get_by_text("chunk", exact=False))
+                if await chunk_node.count() > 0:
+                    await chunk_node.first.click(timeout=3000)
             except Exception:
                 pass
-            for loc in [dropdown.get_by_text(display_label, exact=True), dropdown.get_by_role("option", name=display_label)]:
-                try:
-                    if await loc.count() > 0:
-                        await loc.first.click(timeout=4000)
-                        if _valid(label_text, await combo.input_value()):
+            await asyncio.sleep(delay)
+            dd_visible = await cfg_frame.locator(".slds-dropdown:visible, [role='listbox']:visible").count()
+            if dd_visible > 0:
+                dropdown = cfg_frame.locator(".slds-dropdown:visible, [role='listbox']:visible").last
+                for loc in [dropdown.get_by_text(display_label, exact=True), dropdown.get_by_role("option", name=display_label)]:
+                    try:
+                        ct = await loc.count()
+                        if ct > 0:
+                            await loc.last.click(timeout=4000)
+                            print(f"   [retriever] Field '{display_label}' selected (count={ct})", flush=True)
                             break
-                except Exception:
-                    continue
+                    except Exception:
+                        continue
+                await asyncio.sleep(delay)
+            else:
+                try:
+                    await combo.click(timeout=3000)
+                    await asyncio.sleep(delay)
+                    await combo.fill(filter_text)
+                    await asyncio.sleep(delay * 2)
+                    dropdown = cfg_frame.locator(".slds-dropdown:visible, [role='listbox']:visible").last
+                    await dropdown.wait_for(state="visible", timeout=5000)
+                    for loc in [dropdown.get_by_text(display_label, exact=True), dropdown.get_by_role("option", name=display_label)]:
+                        try:
+                            if await loc.count() > 0:
+                                await loc.last.click(timeout=4000)
+                                print(f"   [retriever] Field '{display_label}' selected after reopen", flush=True)
+                                break
+                        except Exception:
+                            continue
+                    await asyncio.sleep(delay)
+                except Exception as e:
+                    print(f"   [retriever] WARNING: Field '{display_label}' selection failed: {e}", flush=True)
             if check_cb:
                 try:
                     await row.locator(".slds-checkbox_faux").first.click(timeout=3000)
@@ -2362,11 +2387,12 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
 
 async def run_new_index_pipeline(
     username, password, instance_url, prompt_template_api_name, previous_cycle_prompt,
-    state_dir, run_id=None, headless=False
+    state_dir, run_id=None, headless=False, index_prefix=None
 ):
     """
     Full Cycle 2+ pipeline: Create Index → Poll → Create Retriever → Poll retriever → Update prompt template.
     Returns (new_search_index_id, new_retriever_api_name) or (None, None) on failure/abort.
+    index_prefix: pipeline-specific prefix like "Opt_P1" (defaults to legacy global name).
     """
     from salesforce_api import (
         get_salesforce_credentials, get_next_index_name, poll_index_until_ready,
@@ -2377,7 +2403,11 @@ async def run_new_index_pipeline(
         return bool(run_id and check_run_aborted(run_id))
 
     _, access_token = get_salesforce_credentials(username=username, password=password, instance_url=instance_url)
-    index_name = get_next_index_name(instance_url, access_token)
+    if not index_prefix:
+        raise ValueError("indexPrefix is required in YAML configuration. No hardcoded fallback.")
+    if index_prefix[0].isdigit():
+        raise ValueError(f"indexPrefix '{index_prefix}' starts with a digit. Salesforce developer names must start with a letter.")
+    index_name = get_next_index_name(instance_url, access_token, base_name=index_prefix)
     print(f"\n   Creating Search Index: {index_name}", flush=True)
     try:
         index_id, full_index_name = await _create_search_index_ui(

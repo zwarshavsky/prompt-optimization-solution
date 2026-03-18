@@ -248,9 +248,9 @@ def _sites_match(current_url, state_url):
     b = (state_url or '').strip().rstrip('/').lower()
     return bool(a and b and a == b)
 
-def load_state(resume_from_step=None, resume_from_cycle=None, run_id=None, instance_url=None):
-    """Load workflow state from JSON file. If instance_url is provided, only loads state
-    from the same site; refuses to resume a run from a different org."""
+def load_state(resume_from_step=None, resume_from_cycle=None, run_id=None, instance_url=None, prompt_template_name=None):
+    """Load workflow state from JSON file. Filters by instance_url (site isolation)
+    and prompt_template_name (pipeline isolation) when provided."""
     state_dir = get_state_dir()
 
     def _load_and_validate(path):
@@ -287,7 +287,7 @@ def load_state(resume_from_step=None, resume_from_cycle=None, run_id=None, insta
             return _load_and_validate(state_dir / "current_state.json")
         return None
 
-    # When instance_url provided, filter to same-site state files only (never use another site's state)
+    # Filter by site (instance_url) and pipeline (prompt_template_name) to avoid cross-contamination
     candidates = []
     for p in state_files:
         try:
@@ -298,8 +298,11 @@ def load_state(resume_from_step=None, resume_from_cycle=None, run_id=None, insta
                 if not _sites_match(instance_url, state_url):
                     continue
             else:
-                # Caller should pass instance_url when resuming; if not, refuse to pick any state
                 continue
+            if prompt_template_name:
+                state_template = (s.get('yaml_config_snapshot') or {}).get('configuration', {}).get('promptTemplateApiName', '')
+                if state_template and state_template != prompt_template_name:
+                    continue
             candidates.append((p.stat().st_mtime, p))
         except (json.JSONDecodeError, KeyError):
             continue
@@ -1622,7 +1625,8 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
     
     # Get maxCycles from YAML (override command line arg if provided)
     max_cycles = config.get('maxCycles', max_cycles)
-    log_print(f"  ℹ️  Max refinement cycles: {max_cycles}")
+    min_cycles = config.get('minCycles', max_cycles)
+    log_print(f"  ℹ️  Refinement cycles: min={min_cycles}, max={max_cycles}")
     
     # Get Gemini model from YAML (override command line arg if provided)
     gemini_model = config.get('geminiModel', model_name)  # Use YAML value, fallback to command line arg
@@ -1870,8 +1874,9 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
             log_print("  ❌ Cannot resume: instanceUrl required in YAML configuration (site isolation)")
             raise RuntimeError("Cannot resume: instanceUrl required for site isolation")
         
+        current_template_name = config.get('promptTemplateApiName')
         if not state:
-            state = load_state(resume_from_step=resume_from_step, resume_from_cycle=resume_from_cycle, run_id=None, instance_url=current_instance_url)
+            state = load_state(resume_from_step=resume_from_step, resume_from_cycle=resume_from_cycle, run_id=None, instance_url=current_instance_url, prompt_template_name=current_template_name)
         
         if not state:
             # No checkpoint for this site: start fresh Cycle 1 (don't fail)
@@ -2140,6 +2145,7 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                         state_dir=state_dir,
                         run_id=run_id,
                         headless=headless_mode,
+                        index_prefix=config.get('indexPrefix'),
                     ))
                     
                     if not new_index_id or not new_retriever_api_name:
@@ -2660,30 +2666,41 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
             prev_composite_score = curr_composite
             
             if consecutive_no_improvement >= MAX_CONSECUTIVE_NO_IMPROVEMENT:
-                log_print("\n" + "="*80)
-                log_print("⏹️  STOPPING: No improvement for 2 consecutive cycles")
-                log_print("="*80)
-                log_print(f"Composite score stalled at {curr_composite} (PASS={curr_pass}, PARTIAL={curr_partial})")
-                log_print(f"The parser has likely reached its optimization ceiling for these questions.")
-                break
+                if cycle_number >= min_cycles:
+                    log_print("\n" + "="*80)
+                    log_print("⏹️  STOPPING: No improvement for 2 consecutive cycles")
+                    log_print("="*80)
+                    log_print(f"Composite score stalled at {curr_composite} (PASS={curr_pass}, PARTIAL={curr_partial})")
+                    log_print(f"The parser has likely reached its optimization ceiling for these questions.")
+                    break
+                else:
+                    log_print(f"   ℹ️  Stalled but only {cycle_number}/{min_cycles} min cycles done — continuing")
         
-        # Check if we should continue
+        # Check if we should continue (respect minCycles before honoring early-exit signals)
         if stage_status == "optimized":
-            log_print("\n" + "="*80)
-            log_print("✅ REFINEMENT COMPLETE!")
-            log_print("="*80)
-            log_print(f"Stage '{refinement_stage}' is optimized after {cycle_number} cycle(s)")
-            break
+            if cycle_number >= min_cycles:
+                log_print("\n" + "="*80)
+                log_print("✅ REFINEMENT COMPLETE!")
+                log_print("="*80)
+                log_print(f"Stage '{refinement_stage}' is optimized after {cycle_number} cycle(s)")
+                break
+            else:
+                log_print(f"\n   ℹ️  Gemini says 'optimized' but only {cycle_number}/{min_cycles} min cycles done — continuing")
+                stage_status = "needs_improvement"
         
         if stage_status == "rolled_back":
-            log_print("\n" + "="*80)
-            log_print("⚠️  OPTIMIZATION STOPPED - ROLLBACK")
-            log_print("="*80)
-            log_print(f"Stage '{refinement_stage}' rolled back after {cycle_number} cycle(s)")
-            log_print(f"Reason: {stage_complete_reason}")
-            log_print("The optimizer could not improve without causing regressions.")
-            log_print("Consider: reviewing persistent failures manually, adjusting test questions, or trying a different model.")
-            break
+            if cycle_number >= min_cycles:
+                log_print("\n" + "="*80)
+                log_print("⚠️  OPTIMIZATION STOPPED - ROLLBACK")
+                log_print("="*80)
+                log_print(f"Stage '{refinement_stage}' rolled back after {cycle_number} cycle(s)")
+                log_print(f"Reason: {stage_complete_reason}")
+                log_print("The optimizer could not improve without causing regressions.")
+                log_print("Consider: reviewing persistent failures manually, adjusting test questions, or trying a different model.")
+                break
+            else:
+                log_print(f"\n   ℹ️  Gemini says 'rolled_back' but only {cycle_number}/{min_cycles} min cycles done — continuing")
+                stage_status = "needs_improvement"
         
         # Continue to next cycle
         # The proposed prompt from this cycle will be applied at the start of the next cycle (Step 1)
