@@ -212,6 +212,13 @@ def mark_job_as_completed(run_id: str, results: Dict[str, Any]) -> bool:
         conn.close()
 
 
+def get_uploads_restore_dir() -> Path:
+    """Directory where the worker writes PDFs restored from Postgres (next to scripts/python)."""
+    d = Path(__file__).resolve().parent / "app_data" / "uploads"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def load_pdfs_from_db(run_id: str, output_dir: Optional[str] = None) -> List[str]:
     """Load PDF files from Postgres database and save to filesystem"""
     conn = get_db_connection()
@@ -238,13 +245,9 @@ def load_pdfs_from_db(run_id: str, output_dir: Optional[str] = None) -> List[str
             if isinstance(pdf_data, str):
                 pdf_data = json.loads(pdf_data)
             
-            # Create output directory
+            # Create output directory (Heroku: same layout as Streamlit app_data/uploads)
             if not output_dir:
-                # Use app_data/uploads directory
-                script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                uploads_dir = Path(script_dir) / "scripts" / "python" / "app_data" / "uploads"
-                uploads_dir.mkdir(parents=True, exist_ok=True)
-                output_dir = str(uploads_dir)
+                output_dir = str(get_uploads_restore_dir())
             
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)

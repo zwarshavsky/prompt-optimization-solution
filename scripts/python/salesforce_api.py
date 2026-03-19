@@ -407,7 +407,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                             "data": {
                                 "runId": effective_run_id,
                                 "status": status_check,
-                                "model": current_model,
+                                "model": "template_default",
                                 "attempt": attempt + 1
                             },
                             "timestamp": int(_time_for_agent_log.time() * 1000)

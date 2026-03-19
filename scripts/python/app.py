@@ -1491,6 +1491,11 @@ if page == "Create New Run":
                 prompt_tmpl_val = config.get('promptTemplateApiName', "")
                 st.session_state.form_search_index = search_idx_val
                 st.session_state.form_prompt_template = prompt_tmpl_val
+                st.session_state.form_index_prefix = config.get("indexPrefix", "") or ""
+                _mc = config.get("maxCycles", 10)
+                st.session_state.form_max_cycles = int(_mc) if _mc is not None else 10
+                _mn = config.get("minCycles", _mc)
+                st.session_state.form_min_cycles = int(_mn) if _mn is not None else st.session_state.form_max_cycles
                 refinement_stage_from_yaml = config.get('refinementStage', "")
                 if refinement_stage_from_yaml:
                     st.session_state.form_refinement_stage = refinement_stage_from_yaml
@@ -1554,6 +1559,11 @@ if page == "Create New Run":
                 st.session_state.form_instance = salesforce_config.get('instanceUrl', "")
             st.session_state.form_search_index = config.get('searchIndexId', "")
             st.session_state.form_prompt_template = config.get('promptTemplateApiName', "")
+            st.session_state.form_index_prefix = config.get("indexPrefix", "") or ""
+            _mc2 = config.get("maxCycles", 10)
+            st.session_state.form_max_cycles = int(_mc2) if _mc2 is not None else 10
+            _mn2 = config.get("minCycles", _mc2)
+            st.session_state.form_min_cycles = int(_mn2) if _mn2 is not None else st.session_state.form_max_cycles
             st.session_state.form_refinement_stage = config.get('refinementStage', "llm_parser")
             st.session_state.form_gemini_model = config.get('geminiModel', "gemini-2.5-pro")
             prompt_builder_models = config.get('prompt_builder_models', {})
@@ -1609,6 +1619,14 @@ if page == "Create New Run":
     
     # Directory picker will be in the button component
     components.html(drag_drop_js, height=0)
+    
+    # Defaults for refinement cycle inputs (YAML prefill overwrites when present)
+    if "form_index_prefix" not in st.session_state:
+        st.session_state.form_index_prefix = ""
+    if "form_min_cycles" not in st.session_state:
+        st.session_state.form_min_cycles = 5
+    if "form_max_cycles" not in st.session_state:
+        st.session_state.form_max_cycles = 10
     
     # Create Run Form (always visible on this page, not a modal)
     with st.form("create_run_form", clear_on_submit=True):
@@ -1711,6 +1729,35 @@ if page == "Create New Run":
                 index=refinement_stage_index,
                 key="form_refinement_stage"
             )
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            # 2b. Index prefix & cycle bounds (required for Cycle 2+ Playwright index creation)
+            st.markdown('<div class="config-section">', unsafe_allow_html=True)
+            st.markdown('<h3 class="section-title"><i class="bi bi-tag"></i> Index naming & refinement cycles</h3>', unsafe_allow_html=True)
+            st.text_input(
+                "Index prefix (required)",
+                key="form_index_prefix",
+                placeholder="e.g. Heroku_MyJob — must start with a letter",
+                help="New search indexes use this prefix (V2, V3, …). Salesforce developer names must start with a letter.",
+            )
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                st.number_input(
+                    "Minimum refinement cycles",
+                    min_value=1,
+                    max_value=50,
+                    key="form_min_cycles",
+                    help="Workflow will not early-exit before this many cycles (matches YAML minCycles).",
+                )
+            with _c2:
+                st.number_input(
+                    "Maximum refinement cycles",
+                    min_value=1,
+                    max_value=50,
+                    key="form_max_cycles",
+                    help="Upper bound on refinement loops (matches YAML maxCycles).",
+                )
+            st.caption("Upload a YAML with `indexPrefix`, `minCycles`, and `maxCycles` to pre-fill these fields.")
             st.markdown('</div>', unsafe_allow_html=True)
             
             # 3. PDF Files (NOT from YAML - must be uploaded)
@@ -2077,6 +2124,38 @@ if page == "Create New Run":
                 # Add custom instructions if provided
                 if custom_instructions and custom_instructions.strip():
                     config_section['customInstructions'] = custom_instructions.strip()
+                
+                # Index prefix & cycle bounds (required for Playwright index pipeline; matches test_two_inputs.yaml)
+                index_prefix = (st.session_state.get("form_index_prefix") or "").strip()
+                if not index_prefix and yaml_for_template:
+                    index_prefix = (
+                        (yaml_for_template.get("configuration") or {}).get("indexPrefix") or ""
+                    ).strip()
+                if not index_prefix:
+                    st.error(
+                        "❌ **Index prefix is required.** Enter `Index prefix` above or upload a YAML that sets `configuration.indexPrefix`."
+                    )
+                    st.stop()
+                if index_prefix[0].isdigit():
+                    st.error(
+                        "❌ **Index prefix cannot start with a digit** (Salesforce developer-name rules). Use a letter first, e.g. `Heroku_MyRun`."
+                    )
+                    st.stop()
+                config_section["indexPrefix"] = index_prefix
+                try:
+                    min_c = int(st.session_state.get("form_min_cycles", 5))
+                    max_c = int(st.session_state.get("form_max_cycles", 10))
+                except (TypeError, ValueError):
+                    st.error("❌ Minimum and maximum refinement cycles must be integers.")
+                    st.stop()
+                if min_c < 1 or max_c < 1:
+                    st.error("❌ Cycle counts must be at least 1.")
+                    st.stop()
+                if min_c > max_c:
+                    st.error("❌ Minimum refinement cycles cannot exceed maximum.")
+                    st.stop()
+                config_section["minCycles"] = min_c
+                config_section["maxCycles"] = max_c
                 
                 # VALIDATION: PDFs are REQUIRED for Gemini analysis (Step 3)
                 uploaded_pdf_files = st.session_state.get('uploaded_pdf_files', [])
