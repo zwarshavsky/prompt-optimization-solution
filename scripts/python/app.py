@@ -1579,24 +1579,21 @@ if page == "Create New Run":
     has_yaml_loaded = 'uploaded_yaml_data' in st.session_state and st.session_state.get('uploaded_yaml_data') is not None
     
     if not has_yaml_loaded:
-        # No YAML loaded - generate new page ID to force fresh widgets
-        st.session_state.create_run_page_id = f"{time.time()}_{random.randint(1000,9999)}"
+        # No YAML: create page ID once per session (do NOT regenerate every rerun — that
+        # fought form submits and wiped in-progress values). Clear form_* only on that first init.
+        if 'create_run_page_id' not in st.session_state:
+            st.session_state.create_run_page_id = f"{time.time()}_{random.randint(1000,9999)}"
+            keys_to_delete = [key for key in list(st.session_state.keys()) if key.startswith('form_')]
+            for key in keys_to_delete:
+                del st.session_state[key]
+            if 'fallback_models' not in st.session_state:
+                st.session_state.fallback_models = [""]
+            if 'questions' not in st.session_state:
+                st.session_state.questions = [{"number": "Q1", "text": "", "expectedAnswer": ""}]
     else:
         # YAML loaded - keep existing page ID or create one if it doesn't exist
         if 'create_run_page_id' not in st.session_state:
             st.session_state.create_run_page_id = f"{time.time()}_{random.randint(1000,9999)}"
-    if not has_yaml_loaded:
-        # Clear ALL form-related session state keys BEFORE rendering widgets
-        # This ensures fields start blank unless YAML is actively being uploaded
-        keys_to_delete = [key for key in list(st.session_state.keys()) if key.startswith('form_')]
-        for key in keys_to_delete:
-            del st.session_state[key]
-        # Only reset fallback models and questions if they don't exist yet
-        # Don't reset if user has already added items via buttons
-        if 'fallback_models' not in st.session_state:
-            st.session_state.fallback_models = [""]
-        if 'questions' not in st.session_state:
-            st.session_state.questions = [{"number": "Q1", "text": "", "expectedAnswer": ""}]
     
     # Page Header
     st.markdown("""
@@ -1971,10 +1968,10 @@ if page == "Create New Run":
             
             # Get prompt builder models from session state only (populated by YAML upload or user input)
             primary_model_value = st.session_state.get('form_primary_model', "")
-            # Default to OpenAI GPT-4 if nothing loaded yet
+            # Default to OpenAI GPT-4 for index math only — do NOT write session_state here before
+            # the selectbox runs; that clobbered user picks after form submits (e.g. Add Fallback).
             if not primary_model_value:
                 primary_model_value = "sfdc_ai__DefaultOpenAIGPT4"
-                st.session_state.form_primary_model = primary_model_value
             
             primary_models_list = [
                 "sfdc_ai__DefaultBedrockAnthropicClaude45Sonnet",
