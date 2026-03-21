@@ -1042,6 +1042,19 @@ def add_fallback():
         fbs.append("")
     st.session_state.fallback_models = fbs
 
+
+def remove_fallback_at(idx: int):
+    """Remove one fallback row and clear widget keys so Streamlit does not reuse stale values."""
+    fbs = list(st.session_state.get("fallback_models", []))
+    if not (0 <= idx < len(fbs)):
+        return
+    fbs.pop(idx)
+    st.session_state.fallback_models = fbs
+    for k in list(st.session_state.keys()):
+        if isinstance(k, str) and k.startswith("form_fallback_"):
+            del st.session_state[k]
+
+
 # Load local default YAML template (optional, for local testing)
 @st.cache_data
 def load_local_default_yaml():
@@ -2014,59 +2027,61 @@ if page == "Create New Run":
             # Fallback models container
             st.markdown('<div id="fallback-models-container" class="sortable-list">', unsafe_allow_html=True)
             fallback_models = []
+            fallback_options = [
+                "",
+                "sfdc_ai__DefaultOpenAIGPT5",
+                "sfdc_ai__DefaultOpenAIGPT4",
+                "sfdc_ai__DefaultOpenAIGPT4Turbo",
+                "sfdc_ai__DefaultOpenAIGPT4OmniMini",
+                "sfdc_ai__DefaultBedrockAnthropicClaude45Sonnet",
+                "sfdc_ai__DefaultAnthropicClaude35Sonnet",
+                "sfdc_ai__DefaultAnthropicClaude35Haiku",
+                "sfdc_ai__DefaultGoogleGemini25Pro",
+                "sfdc_ai__DefaultGoogleGemini3Pro",
+                "sfdc_ai__DefaultGoogleGemini15Flash",
+            ]
+            _fb_format = lambda x: {
+                "sfdc_ai__DefaultOpenAIGPT5": "OpenAI GPT-5",
+                "sfdc_ai__DefaultOpenAIGPT4": "OpenAI GPT-4",
+                "sfdc_ai__DefaultOpenAIGPT4Turbo": "OpenAI GPT-4 Turbo",
+                "sfdc_ai__DefaultOpenAIGPT4OmniMini": "OpenAI GPT-4 Omni Mini",
+                "sfdc_ai__DefaultBedrockAnthropicClaude45Sonnet": "Anthropic Claude 4.5 Sonnet",
+                "sfdc_ai__DefaultAnthropicClaude35Sonnet": "Anthropic Claude 3.5 Sonnet",
+                "sfdc_ai__DefaultAnthropicClaude35Haiku": "Anthropic Claude 3.5 Haiku",
+                "sfdc_ai__DefaultGoogleGemini25Pro": "Google Gemini 2.5 Pro",
+                "sfdc_ai__DefaultGoogleGemini3Pro": "Google Gemini 3 Pro",
+                "sfdc_ai__DefaultGoogleGemini15Flash": "Google Gemini 1.5 Flash",
+            }.get(x, x) if x else "Select fallback model..."
+
             for i, model in enumerate(st.session_state.fallback_models):
-                col1, col2, col3 = st.columns([1, 10, 1])
+                col1, col2, col3 = st.columns([1, 8, 2])
                 with col1:
                     st.markdown(f'<div class="fallback-item"><div class="input-group"><span class="priority-badge drag-handle" title="Drag to reorder"><i class="bi bi-grip-vertical"></i> {i+1}</span>', unsafe_allow_html=True)
                 with col2:
-                    fallback_options = [
-                        "",
-                        "sfdc_ai__DefaultOpenAIGPT5",
-                        "sfdc_ai__DefaultOpenAIGPT4",
-                        "sfdc_ai__DefaultOpenAIGPT4Turbo",
-                        "sfdc_ai__DefaultOpenAIGPT4OmniMini",
-                        "sfdc_ai__DefaultBedrockAnthropicClaude45Sonnet",
-                        "sfdc_ai__DefaultAnthropicClaude35Sonnet",
-                        "sfdc_ai__DefaultAnthropicClaude35Haiku",
-                        "sfdc_ai__DefaultGoogleGemini25Pro",
-                        "sfdc_ai__DefaultGoogleGemini3Pro",
-                        "sfdc_ai__DefaultGoogleGemini15Flash"
-                    ]
-                    # Initialize widget's session state key from fallback_models if not already set
                     widget_key = f"form_fallback_{i}"
-                    if widget_key not in st.session_state and model:
-                        st.session_state[widget_key] = model
-                    # Get current value: prefer widget's session state (user selection), fallback to model from list
-                    current_value = st.session_state.get(widget_key, model) if model else ""
-                    fallback_index = fallback_options.index(current_value) if current_value and current_value in fallback_options else 0
+                    # Never use `... if model else ""` here — empty list slots must still read widget session state.
+                    if widget_key not in st.session_state:
+                        st.session_state[widget_key] = model or ""
+                    # Rely on key= for value; do not pass index= every run (that can reset sibling widgets).
                     fallback = st.selectbox(
                         f"Fallback {i+1}",
                         fallback_options,
-                        index=fallback_index,
                         key=widget_key,
                         label_visibility="collapsed",
-                        format_func=lambda x: {
-                            "sfdc_ai__DefaultOpenAIGPT5": "OpenAI GPT-5",
-                            "sfdc_ai__DefaultOpenAIGPT4": "OpenAI GPT-4",
-                            "sfdc_ai__DefaultOpenAIGPT4Turbo": "OpenAI GPT-4 Turbo",
-                            "sfdc_ai__DefaultOpenAIGPT4OmniMini": "OpenAI GPT-4 Omni Mini",
-                            "sfdc_ai__DefaultBedrockAnthropicClaude45Sonnet": "Anthropic Claude 4.5 Sonnet",
-                            "sfdc_ai__DefaultAnthropicClaude35Sonnet": "Anthropic Claude 3.5 Sonnet",
-                            "sfdc_ai__DefaultAnthropicClaude35Haiku": "Anthropic Claude 3.5 Haiku",
-                            "sfdc_ai__DefaultGoogleGemini25Pro": "Google Gemini 2.5 Pro",
-                            "sfdc_ai__DefaultGoogleGemini3Pro": "Google Gemini 3 Pro",
-                            "sfdc_ai__DefaultGoogleGemini15Flash": "Google Gemini 1.5 Flash"
-                        }.get(x, x) if x else "Select fallback model..."
+                        format_func=_fb_format,
                     )
-                    # Update session state with selected fallback (widget manages its own key, we sync to fallback_models)
+                    if i < len(st.session_state.fallback_models):
+                        st.session_state.fallback_models[i] = fallback or ""
                     if fallback:
                         fallback_models.append(fallback)
-                        # Sync widget value to fallback_models list for form submission
-                        if i < len(st.session_state.fallback_models):
-                            st.session_state.fallback_models[i] = fallback
-                        else:
-                            st.session_state.fallback_models.append(fallback)
                 with col3:
+                    st.form_submit_button(
+                        "🗑",
+                        key=f"btn_remove_fallback_{i}",
+                        on_click=remove_fallback_at,
+                        args=(i,),
+                        help="Remove this fallback row",
+                    )
                     st.markdown('</div></div>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
             # Add Fallback Model button inside the previous section to avoid spacing
