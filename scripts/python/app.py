@@ -1766,7 +1766,9 @@ if page == "Create New Run":
         st.session_state.form_max_cycles = 10
     
     # Create Run Form (always visible on this page, not a modal)
-    with st.form("create_run_form", clear_on_submit=True):
+    # clear_on_submit=False: any form_submit_button (Add Fallback, Add Question, 🗑 rows, Start Workflow)
+    # triggers a form "submit"; True would wipe Gemini/primary/fallback/questions on those actions.
+    with st.form("create_run_form", clear_on_submit=False):
             # 1. Salesforce Configuration
             st.markdown('<div class="config-section">', unsafe_allow_html=True)
             st.markdown('<h3 class="section-title"><i class="bi bi-cloud"></i> Salesforce Configuration</h3>', unsafe_allow_html=True)
