@@ -596,62 +596,136 @@ def save_runs(runs: List[Dict]) -> None:
     except Exception as e:
         print(f"Error saving runs to JSON file: {e}")
 
-# Page configuration
-st.set_page_config(
-    page_title="Prompt Optimization",
-    page_icon="🚀",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
-# Custom CSS matching mockup exactly
-st.markdown("""
-<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
-<style>
+def build_app_css(dark_mode: bool) -> str:
+    """Light/dark theme variables + layout (sticky sidebar) for Streamlit."""
+    if dark_mode:
+        vars_block = """
+    :root {
+        --primary-color: #FF6B6B;
+        --primary-hover: #ff8585;
+        --secondary-color: #161923;
+        --background-color: #0e1117;
+        --sidebar-bg: #161b22;
+        --text-color: #f0f6fc;
+        --muted-color: #8b949e;
+        --border-color: #30363d;
+        --section-bg: #161b22;
+        --section-shadow: rgba(0, 0, 0, 0.35);
+        --input-bg: #21262d;
+        --input-text: #f0f6fc;
+        --question-caption: #8b949e;
+    }
+        """
+    else:
+        vars_block = """
     :root {
         --primary-color: #FF4B4B;
+        --primary-hover: #E63946;
         --secondary-color: #0E1117;
         --background-color: #FAFAFA;
         --sidebar-bg: #FFFFFF;
         --text-color: #262730;
+        --muted-color: #666666;
         --border-color: #E6E9EF;
+        --section-bg: #ffffff;
+        --section-shadow: rgba(0, 0, 0, 0.05);
+        --input-bg: #ffffff;
+        --input-text: #262730;
+        --question-caption: #666666;
     }
-    
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    
-    .main .block-container {
+        """
+
+    layout_sidebar = """
+    /* Keep left nav visible while scrolling long forms (Heroku / desktop) */
+    .stApp > div {
+        align-items: flex-start !important;
+    }
+    [data-testid="stSidebar"] {
+        position: sticky !important;
+        top: 0 !important;
+        align-self: flex-start !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+        min-height: 100vh !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        z-index: 999991 !important;
+        background-color: var(--sidebar-bg) !important;
+        border-right: 1px solid var(--border-color);
+    }
+    [data-testid="stSidebar"] .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 2rem !important;
+    }
+    /* When Streamlit collapses the sidebar, avoid forcing full viewport height */
+    [data-testid="stSidebar"][aria-expanded="false"] {
+        height: auto !important;
+        max-height: none !important;
+        min-height: auto !important;
+    }
+    """
+
+    return f"""
+{vars_block}
+{layout_sidebar}
+    .stApp {{
+        background-color: var(--background-color);
+        color: var(--text-color);
+    }}
+    [data-testid="stAppViewContainer"] {{
+        background-color: var(--background-color);
+    }}
+    [data-testid="stHeader"] {{
+        background-color: var(--background-color);
+    }}
+    .sidebar-brand h1 {{
+        color: var(--primary-color) !important;
+        font-size: 1.5rem;
+        margin-bottom: 0.25rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }}
+    .sidebar-brand p {{
+        color: var(--muted-color) !important;
+        font-size: 0.875rem;
+        margin-bottom: 1rem;
+    }}
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {{
+        color: var(--text-color);
+    }}
+    #MainMenu {{visibility: hidden;}}
+    footer {{visibility: hidden;}}
+    header {{visibility: hidden;}}
+    .main .block-container {{
         padding-top: 2rem;
         padding-bottom: 2rem;
         max-width: 1200px;
-    }
-    
-    .stButton > button {
+    }}
+    .stButton > button {{
         background-color: var(--primary-color);
         color: white;
         border-radius: 0.5rem;
         font-weight: 500;
         padding: 0.625rem 1.25rem;
         border: none;
-    }
-    
-    .stButton > button:hover {
-        background-color: #E63946;
+    }}
+    .stButton > button:hover {{
+        background-color: var(--primary-hover);
         transform: translateY(-1px);
-        box-shadow: 0 4px 8px rgba(255, 75, 75, 0.2);
-    }
-    
-    .config-section {
-        background: white;
+        box-shadow: 0 4px 8px rgba(255, 75, 75, 0.25);
+    }}
+    .config-section {{
+        background: var(--section-bg);
         border: 1px solid var(--border-color);
         border-radius: 0.75rem;
         padding: 1.5rem;
         margin-bottom: 1.5rem;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-    }
-    
-    .section-title {
+        box-shadow: 0 1px 3px var(--section-shadow);
+    }}
+    .section-title {{
         font-size: 1.25rem;
         font-weight: 600;
         color: var(--text-color);
@@ -661,9 +735,8 @@ st.markdown("""
         gap: 0.5rem;
         padding-bottom: 0.75rem;
         border-bottom: 1px solid var(--border-color);
-    }
-    
-    .priority-badge {
+    }}
+    .priority-badge {{
         background-color: var(--primary-color);
         color: white;
         font-weight: 600;
@@ -673,88 +746,91 @@ st.markdown("""
         cursor: move;
         user-select: none;
         padding: 0.5rem;
-    }
-    
-    .question-item {
-        background: #F8F9FA;
+    }}
+    .question-item {{
+        background: transparent;
         border: 1px solid var(--border-color);
         border-radius: 0.5rem;
         padding: 1rem;
         margin-bottom: 1rem;
-    }
-    
-    .fallback-item {
+    }}
+    .fallback-item {{
         transition: all 0.2s;
         cursor: move;
         margin-bottom: 1rem;
-    }
-    
-    .fallback-item:hover {
+    }}
+    .fallback-item:hover {{
         transform: translateX(5px);
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-    }
-    
-    .fallback-item.dragging {
+        box-shadow: 0 2px 8px var(--section-shadow);
+    }}
+    .fallback-item.dragging {{
         opacity: 0.5;
         transform: rotate(2deg);
-    }
-    
+    }}
+    div[data-testid="stTextInput"] label,
+    div[data-testid="stTextArea"] label,
+    div[data-testid="stSelectbox"] label,
+    div[data-testid="stNumberInput"] label {{
+        color: var(--text-color) !important;
+    }}
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stTextArea"] textarea {{
+        background-color: var(--input-bg) !important;
+        color: var(--input-text) !important;
+        border-color: var(--border-color) !important;
+    }}
+    div[data-baseweb="select"] > div {{
+        background-color: var(--input-bg) !important;
+        border-color: var(--border-color) !important;
+    }}
+    div[data-testid="stRadio"] label,
+    div[data-testid="stRadio"] p {{
+        color: var(--text-color) !important;
+    }}
+    div[data-testid="stExpander"] {{
+        background-color: var(--section-bg);
+        border: 1px solid var(--border-color);
+    }}
     /* Fix white bars - hide empty containers, captions that create boxes */
     div[data-testid*="stTextInput"]:has(input[value=""][placeholder=""]),
     div[data-testid*="stTextInput"]:has(input:not([value]):not(:focus)),
     div[data-testid*="stCaption"]:empty,
     div[data-testid*="stMarkdown"]:has(> p:empty),
-    div[data-testid*="column"]:has(> div:empty:not([data-testid])) {
+    div[data-testid*="column"]:has(> div:empty:not([data-testid])) {{
         display: none !important;
-    }
-    
-    /* Hide empty rounded containers that look like input fields */
+    }}
     div[data-baseweb="input"]:has(input[value=""]:not(:focus):not([placeholder])),
     div.element-container:has(> div:empty),
-    div[data-testid*="column"]:empty {
+    div[data-testid*="column"]:empty {{
         display: none !important;
-    }
-    
-    /* Ensure config sections don't have extra padding */
-    .config-section {
+    }}
+    .config-section {{
         padding: 1.5rem !important;
         margin-bottom: 1.5rem;
-    }
-    
-    /* Remove extra spacing from form */
-    form {
+    }}
+    form {{
         margin: 0;
         padding: 0;
-    }
-    
-    /* Hide any empty white rounded rectangles */
+    }}
     div[style*="border-radius"]:empty,
-    div[class*="rounded"]:empty:not([data-testid*="st"]) {
+    div[class*="rounded"]:empty:not([data-testid*="st"]) {{
         display: none !important;
-    }
-    
-    /* Hide empty config-section divs that create white boxes */
+    }}
     .config-section:empty,
-    .config-section:not(:has(h3)):not(:has(input)):not(:has(select)):not(:has(textarea)):not(:has(button)) {
+    .config-section:not(:has(h3)):not(:has(input)):not(:has(select)):not(:has(textarea)):not(:has(button)) {{
         display: none !important;
         height: 0 !important;
         padding: 0 !important;
         margin: 0 !important;
-    }
-    
-    /* Hide empty containers after sections */
+    }}
     .config-section + div:empty,
-    .config-section + div:not(:has(*)) {
+    .config-section + div:not(:has(*)) {{
         display: none !important;
-    }
-    
-    /* Remove spacing and grey bar in Test Questions section */
-    .test-questions-section .test-questions-title {
+    }}
+    .test-questions-section .test-questions-title {{
         margin-bottom: 0 !important;
         padding-bottom: 0 !important;
-    }
-    
-    /* Remove grey bar from ALL question items - no grey backgrounds on any questions */
+    }}
     .test-questions-section .question-item,
     .test-questions-section .question-item.first-question,
     .test-questions-section .first-question,
@@ -763,71 +839,94 @@ st.markdown("""
     .config-section.test-questions-section .question-item,
     .config-section.test-questions-section .question-item:first-child,
     .test-questions-section > div:has(.question-item),
-    .test-questions-section div:has(.first-question) {
+    .test-questions-section div:has(.first-question) {{
         background: transparent !important;
         background-color: transparent !important;
         border: none !important;
         border-width: 0 !important;
-    }
-    
-    /* First question: no top padding/margin */
+    }}
     .test-questions-section .question-item.first-question,
-    .test-questions-section .question-item:first-child {
+    .test-questions-section .question-item:first-child {{
         padding-top: 0 !important;
         margin-top: 0 !important;
-    }
-    
-    /* Ensure no grey background shows through on any question */
-    .test-questions-section .question-item * {
+    }}
+    .test-questions-section .question-item * {{
         background: inherit !important;
-    }
-    
-    /* Remove any Streamlit-generated spacing between title and first question */
+    }}
     .test-questions-section h3 + *,
     .test-questions-section h3 ~ div:first-of-type,
     .test-questions-section [data-testid*="stMarkdown"]:has(h3.test-questions-title) + *,
     .test-questions-section [data-testid*="stMarkdown"]:has(h3.test-questions-title) ~ *,
     .test-questions-section [data-testid*="stMarkdown"]:has(h3.test-questions-title) + [data-testid*="stMarkdown"],
-    .test-questions-section [data-testid*="stMarkdown"]:has(h3.test-questions-title) ~ [data-testid*="stMarkdown"]:first-of-type {
+    .test-questions-section [data-testid*="stMarkdown"]:has(h3.test-questions-title) ~ [data-testid*="stMarkdown"]:first-of-type {{
         margin-top: 0 !important;
         padding-top: 0 !important;
-    }
-    
-    /* Target the first question-item wrapper specifically */
-    .test-questions-section [data-testid*="stMarkdown"]:has(.question-item:first-child) {
+    }}
+    .test-questions-section [data-testid*="stMarkdown"]:has(.question-item:first-child) {{
         margin-top: 0 !important;
         padding-top: 0 !important;
-    }
-    
-    /* Remove any empty divs or spacing elements */
+    }}
     .test-questions-section > div:empty,
-    .test-questions-section > div:not(:has(*)) {
+    .test-questions-section > div:not(:has(*)) {{
         display: none !important;
         height: 0 !important;
         margin: 0 !important;
         padding: 0 !important;
-    }
-    
-    /* Ensure no grey backgrounds on wrapper elements between questions */
-    .test-questions-section [data-testid*="stMarkdown"]:has(.question-item) {
+    }}
+    .test-questions-section [data-testid*="stMarkdown"]:has(.question-item) {{
         background: transparent !important;
         background-color: transparent !important;
-    }
-    
-    /* Remove any grey backgrounds from Streamlit column wrappers in question items */
+    }}
     .test-questions-section .question-item [data-testid*="column"],
-    .test-questions-section .question-item [data-testid*="stColumn"] {
+    .test-questions-section .question-item [data-testid*="stColumn"] {{
         background: transparent !important;
         background-color: transparent !important;
-    }
-    
-    /* Ensure no spacing creates visible grey bars between questions */
-    .test-questions-section .question-item + .question-item {
+    }}
+    .test-questions-section .question-item + .question-item {{
         margin-top: 0 !important;
         padding-top: 0 !important;
-    }
-</style>
-""", unsafe_allow_html=True)
+    }}
+    .test-questions-section [data-testid="stCaption"] {{
+        color: var(--question-caption) !important;
+    }}
+    """
+
+
+# Page configuration
+st.set_page_config(
+    page_title="Prompt Optimization",
+    page_icon="🚀",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = False
+
+# Sidebar first so dark_mode toggle is applied before theme CSS on each rerun
+with st.sidebar:
+    st.toggle("🌙 Dark mode", key="dark_mode", help="Dark theme for the app")
+    st.markdown(
+        """
+    <div class="sidebar-brand" style="padding: 0.5rem 0 0 0;">
+        <h1><i class="bi bi-rocket-takeoff"></i> Prompt Optimization</h1>
+        <p>Automated RAG Workflow</p>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+    page = st.radio(
+        "Navigation",
+        ["Create New Run", "Jobs"],
+        label_visibility="collapsed",
+        key="nav_radio",
+    )
+
+st.markdown(
+    '<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">'
+    f"<style>{build_app_css(st.session_state.get('dark_mode', False))}</style>",
+    unsafe_allow_html=True,
+)
 
 # Initialize session state
 # Initialize session state with persistent data
@@ -1436,24 +1535,6 @@ button_handler_js = """
 })();
 </script>
 """
-
-# Sidebar Navigation
-with st.sidebar:
-    st.markdown("""
-    <div style="padding: 1rem 0;">
-        <h1 style="color: #FF4B4B; font-size: 1.5rem; margin-bottom: 0.25rem; display: flex; align-items: center; gap: 0.5rem;">
-            <i class="bi bi-rocket-takeoff"></i> Prompt Optimization
-        </h1>
-        <p style="color: #666; font-size: 0.875rem; margin-bottom: 2rem;">Automated RAG Workflow</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    page = st.radio(
-        "Navigation",
-        ["Create New Run", "Jobs"],
-        label_visibility="collapsed",
-        key="nav_radio"
-    )
 
 # Main Content
 if page == "Create New Run":
