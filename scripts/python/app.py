@@ -637,8 +637,11 @@ def build_app_css(dark_mode: bool) -> str:
         """
 
     layout_sidebar = """
-    /* Sticky sidebar when expanded only — avoid fighting Streamlit collapse/expand layout */
-    [data-testid="stSidebar"][aria-expanded="true"] {
+    /* Sidebar stays visible while main content scrolls */
+    .stApp > div {
+        align-items: flex-start !important;
+    }
+    [data-testid="stSidebar"] {
         position: sticky !important;
         top: 0 !important;
         align-self: flex-start !important;
@@ -655,23 +658,12 @@ def build_app_css(dark_mode: bool) -> str:
         padding-top: 1rem !important;
         padding-bottom: 2rem !important;
     }
-    /* Collapsed: no sticky/100vh — let Streamlit place the expand control */
-    [data-testid="stSidebar"][aria-expanded="false"] {
-        background-color: var(--sidebar-bg) !important;
-        border-right: 1px solid var(--border-color);
-        height: auto !important;
-        max-height: none !important;
-        min-height: auto !important;
-        position: relative !important;
-        top: auto !important;
-        align-self: auto !important;
-        overflow: visible !important;
-        z-index: auto !important;
-    }
-    /* Chevron is visibility:hidden until hover by default — keep it discoverable */
+    /* Hide Streamlit collapse chevron — sidebar stays open (temporary UX) */
     [data-testid="stSidebarCollapseButton"],
     [data-testid="stSidebar"] [data-testid="stBaseButton-headerNoPadding"] {
-        visibility: visible !important;
+        display: none !important;
+        pointer-events: none !important;
+        visibility: hidden !important;
     }
     """
 
