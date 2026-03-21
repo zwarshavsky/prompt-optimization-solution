@@ -1540,17 +1540,8 @@ button_handler_js = """
             }
         });
         
-        // Handle Add Fallback Model button
-        parentDoc.querySelectorAll('button').forEach(btn => {
-            if (btn.textContent.includes('Add Fallback Model') && !btn.dataset.handlerAttached) {
-                btn.dataset.handlerAttached = 'true';
-                btn.addEventListener('click', function(e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    parentWindow.location.href = parentWindow.location.pathname + '?add_fallback=1&t=' + Date.now();
-                }, true);
-            }
-        });
+        // Do NOT hijack "Add Fallback Model" — form_submit_button uses on_click=add_fallback.
+        // Old JS navigated to ?add_fallback= and reset Gemini/primary/fallback widget state.
     }
     
     // Run immediately and repeatedly
