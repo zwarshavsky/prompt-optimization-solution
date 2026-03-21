@@ -824,15 +824,12 @@ def build_app_css(dark_mode: bool) -> str:
         background-color: var(--section-bg);
         border: 1px solid var(--border-color);
     }}
-    /* Fix white bars - hide empty containers, captions that create boxes */
-    div[data-testid*="stTextInput"]:has(input[value=""][placeholder=""]),
-    div[data-testid*="stTextInput"]:has(input:not([value]):not(:focus)),
+    /* Fix white bars — do NOT hide stTextInput by empty value; that hid Product/Question multi-input fields */
     div[data-testid*="stCaption"]:empty,
     div[data-testid*="stMarkdown"]:has(> p:empty),
     div[data-testid*="column"]:has(> div:empty:not([data-testid])) {{
         display: none !important;
     }}
-    div[data-baseweb="input"]:has(input[value=""]:not(:focus):not([placeholder])),
     div.element-container:has(> div:empty),
     div[data-testid*="column"]:empty {{
         display: none !important;
