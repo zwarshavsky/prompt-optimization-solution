@@ -51,6 +51,39 @@ def get_config_dir():
 # Path to store runs data (relative to script) - fallback for local development
 RUNS_DATA_FILE = get_app_data_dir() / "runs_data.json"
 
+# Gemini API model IDs for workflow analysis/scoring (must match google-generativeai).
+# If YAML sets geminiModel to a value not listed here, it is prepended so the selectbox still works.
+GEMINI_ANALYSIS_MODEL_IDS = [
+    "gemini-3-pro-preview",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.5-pro-preview-06-05",
+    "gemini-2.0-flash-001",
+]
+GEMINI_ANALYSIS_MODEL_LABELS = {
+    "gemini-3-pro-preview": "Gemini 3 Pro (Preview)",
+    "gemini-2.5-pro": "Gemini 2.5 Pro (Recommended)",
+    "gemini-2.5-flash": "Gemini 2.5 Flash (Fast)",
+    "gemini-2.0-flash": "Gemini 2.0 Flash",
+    "gemini-2.5-pro-preview-06-05": "Gemini 2.5 Pro Preview (06-05)",
+    "gemini-2.0-flash-001": "Gemini 2.0 Flash (001)",
+}
+
+
+def _gemini_analysis_models_for_select(current_id: str) -> list:
+    """Ordered model list for the UI; ensures YAML/custom IDs appear in the dropdown."""
+    base = list(GEMINI_ANALYSIS_MODEL_IDS)
+    cid = (current_id or "").strip()
+    if cid and cid not in base:
+        return [cid] + base
+    return base
+
+
+def _format_gemini_analysis_model(model_id: str) -> str:
+    return GEMINI_ANALYSIS_MODEL_LABELS.get(model_id, model_id)
+
+
 def get_db_connection():
     """Get PostgreSQL database connection from Heroku DATABASE_URL"""
     try:
@@ -1915,21 +1948,16 @@ if page == "Create New Run":
             st.markdown('<div class="config-section">', unsafe_allow_html=True)
             st.markdown('<h3 class="section-title"><i class="bi bi-cpu"></i> Gemini Analysis Model</h3>', unsafe_allow_html=True)
             
-            gemini_models = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro-preview-06-05"]
             gemini_value = st.session_state.get('form_gemini_model', "gemini-2.5-pro")
+            gemini_models = _gemini_analysis_models_for_select(gemini_value)
             gemini_index = gemini_models.index(gemini_value) if gemini_value in gemini_models else 0
-            
+
             gemini_model = st.selectbox(
                 "Model",
                 gemini_models,
                 index=gemini_index,
                 key="form_gemini_model",
-                format_func=lambda x: {
-                    "gemini-2.5-pro": "Gemini 2.5 Pro (Recommended)",
-                    "gemini-2.5-flash": "Gemini 2.5 Flash (Fast)",
-                    "gemini-2.0-flash": "Gemini 2.0 Flash",
-                    "gemini-2.5-pro-preview-06-05": "Gemini 2.5 Pro Preview"
-                }.get(x, x)
+                format_func=_format_gemini_analysis_model,
             )
             st.caption("Model used for analyzing/scoring responses")
             st.markdown('</div>', unsafe_allow_html=True)
