@@ -846,10 +846,52 @@ if 'questions' not in st.session_state:
 # Removed pdf_directory_path - PDFs must be uploaded via file uploader only
 
 # Helpers for dynamic add/remove without HTML/JS handlers
+def _configuration_prompt_inputs(yaml_dict: Any) -> List[Dict[str, Any]]:
+    """Return configuration.promptInputs from uploaded or default YAML."""
+    if not yaml_dict or not isinstance(yaml_dict, dict):
+        return []
+    cfg = yaml_dict.get("configuration") or {}
+    pins = cfg.get("promptInputs")
+    return pins if isinstance(pins, list) else []
+
+
+def _init_question_widget_keys_from_yaml(test_questions: List[Any], config: Dict[str, Any]) -> None:
+    """Populate form_q_* session keys for each question (single text and/or multi-input)."""
+    prompt_inputs = config.get("promptInputs") or []
+    for i, q in enumerate(test_questions):
+        if not isinstance(q, dict):
+            continue
+        q_num_key = f"form_q_num_{i}"
+        q_text_key = f"form_q_text_{i}"
+        q_expected_key = f"form_q_expected_{i}"
+        if q.get("number"):
+            st.session_state[q_num_key] = q["number"]
+        if q.get("text") is not None:
+            st.session_state[q_text_key] = q["text"]
+        if q.get("expectedAnswer") is not None:
+            st.session_state[q_expected_key] = q["expectedAnswer"]
+        inp = q.get("inputs")
+        if not isinstance(inp, dict):
+            inp = {}
+        for j, pin in enumerate(prompt_inputs):
+            if not isinstance(pin, dict):
+                continue
+            aname = pin.get("apiName") or pin.get("api_name")
+            key = f"form_q_input_{i}_{j}"
+            if aname is not None:
+                st.session_state[key] = str(inp.get(aname, "") or "")
+
+
 def add_question():
     qs = st.session_state.get('questions', [])
     new_num = len(qs) + 1
-    qs.append({"number": f"Q{new_num}", "text": "", "expectedAnswer": ""})
+    yaml_data = st.session_state.get("uploaded_yaml_data")
+    pin_list = _configuration_prompt_inputs(yaml_data) if yaml_data else []
+    if pin_list:
+        blank = {pin.get("apiName"): "" for pin in pin_list if pin.get("apiName")}
+        qs.append({"number": f"Q{new_num}", "inputs": blank, "expectedAnswer": ""})
+    else:
+        qs.append({"number": f"Q{new_num}", "text": "", "expectedAnswer": ""})
     st.session_state.questions = qs
 
 
@@ -1518,17 +1560,7 @@ if page == "Create New Run":
                 test_questions = uploaded_yaml_data.get('questions', []) or config.get('testQuestions', [])
                 if test_questions:
                     st.session_state.questions = test_questions
-                    # Initialize widget session state keys for all questions from YAML
-                    for i, q in enumerate(test_questions):
-                        q_num_key = f"form_q_num_{i}"
-                        q_text_key = f"form_q_text_{i}"
-                        q_expected_key = f"form_q_expected_{i}"
-                        if q.get("number"):
-                            st.session_state[q_num_key] = q["number"]
-                        if q.get("text"):
-                            st.session_state[q_text_key] = q["text"]
-                        if q.get("expectedAnswer"):
-                            st.session_state[q_expected_key] = q["expectedAnswer"]
+                    _init_question_widget_keys_from_yaml(test_questions, config)
                 else:
                     st.session_state.questions = [{"number": "Q1", "text": "", "expectedAnswer": ""}]
                 
@@ -1578,18 +1610,8 @@ if page == "Create New Run":
             # Check both root level 'questions' and config level 'testQuestions'
             test_questions = uploaded_yaml_data.get('questions', []) or config.get('testQuestions', [])
             st.session_state.questions = test_questions if test_questions else [{"number": "Q1", "text": "", "expectedAnswer": ""}]
-            # Initialize question widget keys
             if test_questions:
-                for i, q in enumerate(test_questions):
-                    q_num_key = f"form_q_num_{i}"
-                    q_text_key = f"form_q_text_{i}"
-                    q_expected_key = f"form_q_expected_{i}"
-                    if q.get("number"):
-                        st.session_state[q_num_key] = q["number"]
-                    if q.get("text"):
-                        st.session_state[q_text_key] = q["text"]
-                    if q.get("expectedAnswer"):
-                        st.session_state[q_expected_key] = q["expectedAnswer"]
+                _init_question_widget_keys_from_yaml(test_questions, config)
             st.session_state.form_custom_instructions = config.get('customInstructions', "")
             st.session_state.yaml_prefilled = True
     
@@ -1950,7 +1972,11 @@ if page == "Create New Run":
             st.markdown('<div class="config-section test-questions-section">', unsafe_allow_html=True)
             st.markdown('<h3 class="section-title test-questions-title" style="margin-bottom: 0 !important; padding-bottom: 0 !important;"><i class="bi bi-question-circle"></i> Test Questions</h3>', unsafe_allow_html=True)
             
+            pin_list = _configuration_prompt_inputs(yaml_for_template)
+            
             for i, q in enumerate(st.session_state.questions):
+                if not isinstance(q, dict):
+                    q = {"number": f"Q{i+1}", "text": "", "expectedAnswer": ""}
                 q_num_key = f"form_q_num_{i}"
                 q_text_key = f"form_q_text_{i}"
                 q_expected_key = f"form_q_expected_{i}"
@@ -1973,7 +1999,20 @@ if page == "Create New Run":
                 with col1:
                     q_num = st.text_input("Q#", value=q_num_value, key=q_num_key)
                 with col2:
-                    q_text = st.text_area("Question Text", value=q_text_value, key=q_text_key, height=80)
+                    if pin_list:
+                        st.caption("Inputs (multi-input template)")
+                        q_inputs = q.get("inputs") if isinstance(q.get("inputs"), dict) else {}
+                        for j, pin in enumerate(pin_list):
+                            if not isinstance(pin, dict):
+                                continue
+                            aname = pin.get("apiName") or pin.get("api_name") or f"input_{j}"
+                            label = pin.get("displayName") or aname
+                            inp_key = f"form_q_input_{i}_{j}"
+                            if inp_key not in st.session_state:
+                                st.session_state[inp_key] = str(q_inputs.get(aname, "") or "")
+                            st.text_input(label, key=inp_key)
+                    else:
+                        q_text = st.text_area("Question Text", value=q_text_value, key=q_text_key, height=80)
                 with col3:
                     q_expected = st.text_area("Expected Answer", value=q_expected_value, key=q_expected_key, height=80)
                 with col4:
@@ -2079,18 +2118,48 @@ if page == "Create New Run":
                 st.rerun()
             
             if submit_clicked:
-                # Collect questions from form
+                # Collect questions from form (single text or multi-input from YAML promptInputs)
                 questions_clean = []
-                for i in range(len(st.session_state.questions)):
-                    q_num_val = st.session_state.get(f"form_q_num_{i}", "")
-                    q_text_val = st.session_state.get(f"form_q_text_{i}", "")
-                    q_expected_val = st.session_state.get(f"form_q_expected_{i}", "")
-                    if q_num_val and q_text_val:
-                        questions_clean.append({
-                            "number": q_num_val,
-                            "text": q_text_val,
-                            "expectedAnswer": q_expected_val
-                        })
+                submit_pin_list = _configuration_prompt_inputs(yaml_for_template)
+                if submit_pin_list:
+                    for i in range(len(st.session_state.questions)):
+                        q_num_val = st.session_state.get(f"form_q_num_{i}", "")
+                        q_expected_val = st.session_state.get(f"form_q_expected_{i}", "")
+                        inputs_dict: Dict[str, str] = {}
+                        missing = False
+                        for j, pin in enumerate(submit_pin_list):
+                            if not isinstance(pin, dict):
+                                continue
+                            aname = pin.get("apiName") or pin.get("api_name")
+                            if not aname:
+                                continue
+                            raw = st.session_state.get(f"form_q_input_{i}_{j}", "")
+                            val = (raw or "").strip()
+                            if not val:
+                                missing = True
+                            inputs_dict[aname] = val
+                        if q_num_val and not missing and inputs_dict:
+                            questions_clean.append({
+                                "number": q_num_val,
+                                "inputs": inputs_dict,
+                                "expectedAnswer": q_expected_val,
+                            })
+                    if not questions_clean:
+                        st.error(
+                            "❌ **Each question needs a Q# and all template inputs filled** (from YAML `promptInputs`)."
+                        )
+                        st.stop()
+                else:
+                    for i in range(len(st.session_state.questions)):
+                        q_num_val = st.session_state.get(f"form_q_num_{i}", "")
+                        q_text_val = st.session_state.get(f"form_q_text_{i}", "")
+                        q_expected_val = st.session_state.get(f"form_q_expected_{i}", "")
+                        if q_num_val and q_text_val:
+                            questions_clean.append({
+                                "number": q_num_val,
+                                "text": q_text_val,
+                                "expectedAnswer": q_expected_val
+                            })
                 
                 # Build YAML config
                 config_section = {
@@ -2120,6 +2189,10 @@ if page == "Create New Run":
                 # Add refinementStages from yaml_for_template (uploaded or default)
                 if yaml_for_template and yaml_for_template.get('configuration', {}).get('refinementStages'):
                     config_section['refinementStages'] = yaml_for_template['configuration']['refinementStages']
+                
+                # Multi-input templates: pass promptInputs through to worker (must match questions[].inputs)
+                if submit_pin_list:
+                    config_section['promptInputs'] = submit_pin_list
                 
                 # Add custom instructions if provided
                 if custom_instructions and custom_instructions.strip():
