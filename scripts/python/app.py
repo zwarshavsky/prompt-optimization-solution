@@ -474,26 +474,24 @@ def detect_and_mark_dead_jobs(stale_threshold_minutes: int = 30) -> int:
     
     try:
         with conn.cursor() as cur:
-            # Find jobs with status='running' that have stale or missing heartbeat
+            # Stale = last activity older than threshold. Use COALESCE so we never treat
+            # "heartbeat NULL" alone as dead (that falsely failed jobs on every Jobs page load).
             cur.execute("""
-                SELECT run_id, heartbeat_at, updated_at
+                SELECT run_id, heartbeat_at, updated_at, started_at
                 FROM runs
                 WHERE status = 'running'
-                AND (
-                    heartbeat_at IS NULL 
-                    OR heartbeat_at < NOW() - INTERVAL '%s minutes'
-                )
+                AND COALESCE(heartbeat_at, updated_at, started_at)
+                    < (NOW() - (%s * INTERVAL '1 minute'))
             """, (stale_threshold_minutes,))
             
             dead_jobs = cur.fetchall()
             count = 0
             
-            for run_id, heartbeat_at, updated_at in dead_jobs:
+            for run_id, heartbeat_at, updated_at, started_at in dead_jobs:
                 # Mark as failed with appropriate error message
                 error_msg = f"Job appears to have stopped (no heartbeat detected for > {stale_threshold_minutes} minutes). Possible dyno restart or process crash."
                 
-                # Use heartbeat_at if available, otherwise updated_at
-                last_activity = heartbeat_at if heartbeat_at else updated_at
+                last_activity = heartbeat_at or updated_at or started_at
                 
                 cur.execute("""
                     UPDATE runs
@@ -504,6 +502,10 @@ def detect_and_mark_dead_jobs(stale_threshold_minutes: int = 30) -> int:
                     WHERE run_id = %s
                 """, (error_msg, last_activity, run_id))
                 count += 1
+                print(
+                    f"[APP] Dead job → failed: {run_id} (heartbeat_at={heartbeat_at}, updated_at={updated_at})",
+                    flush=True,
+                )
             
             conn.commit()
             if count > 0:
