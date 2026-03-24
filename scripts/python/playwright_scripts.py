@@ -84,7 +84,7 @@ async def _try_submit_mfa_code(page, code: str) -> bool:
         return False
 
 
-async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout_seconds: int = 600) -> bool:
+async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout_seconds: int = 1800) -> bool:
     if run_id:
         update_job_progress(
             run_id,
@@ -2035,7 +2035,7 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
         if _is_mfa_or_verification_url(current_url):
             page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 600) : 'no-body'")
             print(f"   [create_index] MFA/verification page detected.\n   URL: {current_url}\n   Page text: {page_text}", flush=True)
-            resumed = await _wait_for_mfa_code_and_resume(page, run_id, should_abort, timeout_seconds=600)
+            resumed = await _wait_for_mfa_code_and_resume(page, run_id, should_abort, timeout_seconds=1800)
             if not resumed:
                 await browser.close()
                 return (None, None)
@@ -2256,7 +2256,7 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
         if _is_mfa_or_verification_url(current_url):
             page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 600) : 'no-body'")
             print(f"   [create_retriever] MFA/verification page detected.\n   URL: {current_url}\n   Page text: {page_text}", flush=True)
-            resumed = await _wait_for_mfa_code_and_resume(page, run_id, should_abort, timeout_seconds=600)
+            resumed = await _wait_for_mfa_code_and_resume(page, run_id, should_abort, timeout_seconds=1800)
             if not resumed:
                 await browser.close()
                 return ("", False)
