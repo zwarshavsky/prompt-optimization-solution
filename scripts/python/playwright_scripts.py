@@ -2093,71 +2093,39 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
         textarea = builder.locator("textarea[name='prompt']").first
         await textarea.wait_for(state="visible", timeout=10000)
         await textarea.fill(parser_prompt)
-        # Navigate through wizard steps to reach the chunking configuration.
-        # Instead of blind "Next" clicks, we advance one step at a time and
-        # check whether the chunking inputs (numeric fields for Max Tokens /
-        # Overlap) have appeared. This is resilient to wizard-step ordering
-        # changes and slow loading on Heroku.
-        chunk_inputs = builder.locator("input[type='number'], input[inputmode='numeric'], [role='spinbutton']")
+        # Two Next clicks to reach the chunking configuration step.
+        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(3)
+        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(3)
+        # Diagnostic: dump ALL table rows on this page to understand what we're seeing
+        chunking_diag = await builder.evaluate("""() => {
+            const trs = [...document.querySelectorAll('tr')];
+            return {
+                trCount: trs.length,
+                trTexts: trs.map(r => r.textContent.trim().substring(0, 120)),
+                url: window.location.href
+            };
+        }""")
+        print(f"   [create_index] Chunking page diag: {chunking_diag}", flush=True)
         pdf_row = builder.locator("tr").filter(has_text="pdf").first
-        _found_chunking = False
-        for _next_step in range(1, 6):
-            await builder.get_by_role("button", name="Next").click()
-            print(f"   [create_index] Clicked Next (advance #{_next_step}). Waiting for step to load...", flush=True)
-            await asyncio.sleep(4)
-            # Dump step diagnostics
-            step_diag = await builder.evaluate("""() => {
-                function deepQuery(root, sel) {
-                    let r = [...root.querySelectorAll(sel)];
-                    root.querySelectorAll('*').forEach(e => {
-                        if (e.shadowRoot) r.push(...deepQuery(e.shadowRoot, sel));
-                    });
-                    return r;
-                }
-                const headings = deepQuery(document, 'h1,h2,h3,.slds-text-heading--medium,.slds-text-heading--small,.step-title');
-                const hTexts = headings.map(h => h.textContent.trim()).filter(t => t.length > 0 && t.length < 100);
-                const allInputs = deepQuery(document, 'input');
-                const numericInputs = deepQuery(document, "input[type='number'], input[inputmode='numeric'], [role='spinbutton']");
-                const trs = deepQuery(document, 'tr');
-                const trTexts = trs.map(r => r.textContent.trim().substring(0, 80)).filter(t => t.length > 0);
-                return {headings: hTexts.slice(0, 5), allInputs: allInputs.length, numericInputs: numericInputs.length, trTexts: trTexts.slice(0, 10)};
-            }""")
-            print(f"   [create_index] Step {_next_step} diagnostic: {step_diag}", flush=True)
-            # Check if the pdf row is visible on this step
-            if await pdf_row.is_visible():
-                print(f"   [create_index] PDF row visible on step {_next_step}. Clicking to expand chunking...", flush=True)
-                for _click_attempt in range(1, 5):
-                    await pdf_row.click()
-                    await asyncio.sleep(2)
-                    if await chunk_inputs.count() >= 2:
-                        try:
-                            await chunk_inputs.nth(0).wait_for(state="visible", timeout=5000)
-                            _found_chunking = True
-                            break
-                        except Exception:
-                            pass
-                    print(f"   [create_index] Click attempt {_click_attempt}/4 on PDF row – no chunking inputs yet.", flush=True)
-                    if _click_attempt >= 2:
-                        await pdf_row.click(force=True)
-                        await asyncio.sleep(2)
-                        if await chunk_inputs.count() >= 2:
-                            try:
-                                await chunk_inputs.nth(0).wait_for(state="visible", timeout=5000)
-                                _found_chunking = True
-                                break
-                            except Exception:
-                                pass
-                if _found_chunking:
-                    print(f"   [create_index] ✅ Chunking inputs found after advancing {_next_step} step(s).", flush=True)
-                    break
-                else:
-                    print(f"   [create_index] PDF row visible but chunking inputs did NOT appear. Trying next wizard step...", flush=True)
-            elif await chunk_inputs.count() >= 2:
-                _found_chunking = True
-                print(f"   [create_index] ✅ Chunking inputs found (no PDF row click needed) at step {_next_step}.", flush=True)
-                break
-        if not _found_chunking:
-            raise RuntimeError("Chunking numeric inputs never found after advancing through 5 wizard steps.")
+        # Log what the pdf_row locator actually resolved to
+        pdf_row_count = await builder.locator("tr").filter(has_text="pdf").count()
+        print(f"   [create_index] pdf_row locator matched {pdf_row_count} row(s)", flush=True)
+        if pdf_row_count > 0:
+            pdf_row_text = await pdf_row.inner_text()
+            print(f"   [create_index] pdf_row text: '{pdf_row_text}'", flush=True)
+        await pdf_row.wait_for(state="visible", timeout=15000)
+        await pdf_row.scroll_into_view_if_needed()
+        await asyncio.sleep(0.5)
+        await pdf_row.click()
+        await asyncio.sleep(2)
+        chunk_inputs = builder.locator("input[type='number'], input[inputmode='numeric'], [role='spinbutton']")
+        if await chunk_inputs.count() < 2:
+            print(f"   [create_index] First click didn't expand. Retrying with force...", flush=True)
+            await pdf_row.click(force=True)
+            await asyncio.sleep(3)
+        await chunk_inputs.nth(0).wait_for(state="visible", timeout=20000)
         # Max Tokens
         max_tokens_input = chunk_inputs.nth(0)
         await max_tokens_input.click()
