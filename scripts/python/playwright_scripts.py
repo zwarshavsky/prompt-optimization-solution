@@ -2098,34 +2098,70 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
         await asyncio.sleep(3)
         await builder.get_by_role("button", name="Next").click()
         await asyncio.sleep(3)
-        # Diagnostic: dump ALL table rows on this page to understand what we're seeing
-        chunking_diag = await builder.evaluate("""() => {
-            const trs = [...document.querySelectorAll('tr')];
-            return {
-                trCount: trs.length,
-                trTexts: trs.map(r => r.textContent.trim().substring(0, 120)),
-                url: window.location.href
-            };
-        }""")
-        print(f"   [create_index] Chunking page diag: {chunking_diag}", flush=True)
+
         pdf_row = builder.locator("tr").filter(has_text="pdf").first
-        # Log what the pdf_row locator actually resolved to
-        pdf_row_count = await builder.locator("tr").filter(has_text="pdf").count()
-        print(f"   [create_index] pdf_row locator matched {pdf_row_count} row(s)", flush=True)
-        if pdf_row_count > 0:
-            pdf_row_text = await pdf_row.inner_text()
-            print(f"   [create_index] pdf_row text: '{pdf_row_text}'", flush=True)
         await pdf_row.wait_for(state="visible", timeout=15000)
-        await pdf_row.scroll_into_view_if_needed()
-        await asyncio.sleep(0.5)
-        await pdf_row.click()
-        await asyncio.sleep(2)
+        pdf_row_text = await pdf_row.inner_text()
+        print(f"   [create_index] pdf_row text: '{pdf_row_text}'", flush=True)
+
+        # Dump the pdf row's inner HTML to understand its structure
+        pdf_row_html = await pdf_row.evaluate("el => el.innerHTML.substring(0, 1500)")
+        print(f"   [create_index] pdf_row HTML: {pdf_row_html}", flush=True)
+
+        # Try multiple interaction strategies to expand the pdf row
         chunk_inputs = builder.locator("input[type='number'], input[inputmode='numeric'], [role='spinbutton']")
+
+        # Strategy 1: Click expand/toggle button inside the row
+        expand_btn = pdf_row.locator("button, [role='button'], lightning-primitive-icon, lightning-button-icon, .slds-button").first
+        if await expand_btn.count() > 0:
+            print(f"   [create_index] Strategy 1: clicking expand button in pdf row", flush=True)
+            await expand_btn.click()
+            await asyncio.sleep(2)
+
         if await chunk_inputs.count() < 2:
-            print(f"   [create_index] First click didn't expand. Retrying with force...", flush=True)
+            # Strategy 2: Click the first cell (td) of the row
+            first_td = pdf_row.locator("td").first
+            if await first_td.count() > 0:
+                print(f"   [create_index] Strategy 2: clicking first td in pdf row", flush=True)
+                await first_td.click()
+                await asyncio.sleep(2)
+
+        if await chunk_inputs.count() < 2:
+            # Strategy 3: Click the row itself
+            print(f"   [create_index] Strategy 3: clicking pdf row directly", flush=True)
+            await pdf_row.scroll_into_view_if_needed()
+            await pdf_row.click()
+            await asyncio.sleep(2)
+
+        if await chunk_inputs.count() < 2:
+            # Strategy 4: Force click on the row
+            print(f"   [create_index] Strategy 4: force-clicking pdf row", flush=True)
             await pdf_row.click(force=True)
             await asyncio.sleep(3)
-        await chunk_inputs.nth(0).wait_for(state="visible", timeout=20000)
+
+        if await chunk_inputs.count() < 2:
+            # Strategy 5: Click any element with "pdf" text (maybe it's a link/anchor)
+            pdf_text_el = pdf_row.locator("a, span, td").filter(has_text="pdf").first
+            if await pdf_text_el.count() > 0:
+                print(f"   [create_index] Strategy 5: clicking pdf text element", flush=True)
+                await pdf_text_el.click()
+                await asyncio.sleep(2)
+
+        final_count = await chunk_inputs.count()
+        print(f"   [create_index] After all strategies: {final_count} chunk input(s) found", flush=True)
+        if final_count < 2:
+            # Dump full page state for debugging
+            all_inputs = await builder.locator("input").count()
+            all_btns = await builder.locator("button").count()
+            print(f"   [create_index] Page has {all_inputs} input(s), {all_btns} button(s)", flush=True)
+            # Check if inputs appeared but with different selectors
+            spin_count = await builder.locator("[role='spinbutton']").count()
+            number_count = await builder.locator("input[type='number']").count()
+            numeric_count = await builder.locator("input[inputmode='numeric']").count()
+            print(f"   [create_index] spinbutton={spin_count} number={number_count} numeric={numeric_count}", flush=True)
+            raise RuntimeError(f"Chunking inputs not found after 5 expand strategies. pdf_row text='{pdf_row_text}'")
+
+        await chunk_inputs.nth(0).wait_for(state="visible", timeout=10000)
         # Max Tokens
         max_tokens_input = chunk_inputs.nth(0)
         await max_tokens_input.click()
