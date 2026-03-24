@@ -2033,7 +2033,8 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
         await asyncio.sleep(1)
         current_url = page.url
         if _is_mfa_or_verification_url(current_url):
-            print("   [create_index] MFA verification required.", flush=True)
+            page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 600) : 'no-body'")
+            print(f"   [create_index] MFA/verification page detected.\n   URL: {current_url}\n   Page text: {page_text}", flush=True)
             resumed = await _wait_for_mfa_code_and_resume(page, run_id, should_abort, timeout_seconds=600)
             if not resumed:
                 await browser.close()
@@ -2285,7 +2286,8 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
         await asyncio.sleep(1)
         current_url = page.url
         if _is_mfa_or_verification_url(current_url):
-            print("   [create_retriever] MFA verification required.", flush=True)
+            page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 600) : 'no-body'")
+            print(f"   [create_retriever] MFA/verification page detected.\n   URL: {current_url}\n   Page text: {page_text}", flush=True)
             resumed = await _wait_for_mfa_code_and_resume(page, run_id, should_abort, timeout_seconds=600)
             if not resumed:
                 await browser.close()
