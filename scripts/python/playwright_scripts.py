@@ -2098,10 +2098,17 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
         await asyncio.sleep(1)
         pdf_row = builder.locator("tr").filter(has_text="pdf").first
         await pdf_row.wait_for(state="visible", timeout=15000)
-        await pdf_row.click()
-        await asyncio.sleep(3)
         chunk_inputs = builder.locator("input[type='number'], input[inputmode='numeric'], [role='spinbutton']")
-        await chunk_inputs.nth(0).wait_for(state="visible", timeout=20000)
+        for _click_attempt in range(1, 5):
+            await pdf_row.click()
+            try:
+                await chunk_inputs.nth(0).wait_for(state="visible", timeout=10000)
+                break
+            except Exception:
+                print(f"   [create_index] Chunking inputs not visible after click attempt {_click_attempt}/4, retrying...", flush=True)
+                await asyncio.sleep(2)
+        else:
+            raise RuntimeError("Chunking numeric inputs never became visible after 4 click attempts on the PDF row.")
         # Max Tokens
         max_tokens_input = chunk_inputs.nth(0)
         await max_tokens_input.click()
