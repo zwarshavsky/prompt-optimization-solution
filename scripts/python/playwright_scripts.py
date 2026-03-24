@@ -2093,11 +2093,12 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
         await textarea.wait_for(state="visible", timeout=10000)
         await textarea.fill(parser_prompt)
         await builder.get_by_role("button", name="Next").click()
-        await asyncio.sleep(1)
+        await asyncio.sleep(3)
         await builder.get_by_role("button", name="Next").click()
-        await asyncio.sleep(1)
+        await asyncio.sleep(3)
         pdf_row = builder.locator("tr").filter(has_text="pdf").first
         await pdf_row.wait_for(state="visible", timeout=15000)
+        print(f"   [create_index] PDF row visible. Page URL: {builder.url}", flush=True)
         chunk_inputs = builder.locator("input[type='number'], input[inputmode='numeric'], [role='spinbutton']")
         for _click_attempt in range(1, 5):
             if _click_attempt <= 2:
