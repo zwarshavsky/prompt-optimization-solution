@@ -85,4 +85,6 @@ scripts/python/memory_test/test_index_update_memory.py
 scripts/python/test_fixes.py
 /comp_analysis_presentation
 /migration_options
+/presentations/
 inputs/test_two_inputs.yaml
+heroku_streamlit_proof.png
