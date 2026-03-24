@@ -2112,31 +2112,30 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
                     break
                 except Exception:
                     pass
-            # JS fallback: find the row and dispatch a click event directly
-            print(f"   [create_index] Attempt {_click_attempt}/4: Playwright click didn't expand chunking. Trying JS click...", flush=True)
-            await page.evaluate("""() => {
-                const rows = document.querySelectorAll('tr');
+            print(f"   [create_index] Attempt {_click_attempt}/4: Playwright click didn't expand chunking. Trying JS click on builder popup...", flush=True)
+            js_result = await builder.evaluate("""() => {
+                function deepQuery(root, selector) {
+                    let results = [...root.querySelectorAll(selector)];
+                    root.querySelectorAll('*').forEach(el => {
+                        if (el.shadowRoot) results.push(...deepQuery(el.shadowRoot, selector));
+                    });
+                    return results;
+                }
+                // Click pdf row
+                const rows = deepQuery(document, 'tr');
+                let clicked = 'no-pdf-row';
                 for (const row of rows) {
                     if (row.textContent && row.textContent.includes('pdf')) {
                         row.click();
-                        return 'clicked-tr';
+                        clicked = 'clicked-pdf-row';
+                        break;
                     }
                 }
-                // Search inside shadow DOMs
-                const allHosts = document.querySelectorAll('*');
-                for (const host of allHosts) {
-                    if (host.shadowRoot) {
-                        const sRows = host.shadowRoot.querySelectorAll('tr');
-                        for (const sr of sRows) {
-                            if (sr.textContent && sr.textContent.includes('pdf')) {
-                                sr.click();
-                                return 'clicked-shadow-tr';
-                            }
-                        }
-                    }
-                }
-                return 'no-pdf-row-found';
+                // Count inputs
+                const inputs = deepQuery(document, "input[type='number'], input[inputmode='numeric'], [role='spinbutton']");
+                return {clicked, inputCount: inputs.length, url: window.location.href};
             }""")
+            print(f"   [create_index] JS click result: {js_result}", flush=True)
             await asyncio.sleep(3)
             if await chunk_inputs.count() >= 2:
                 try:
@@ -2144,19 +2143,20 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
                     break
                 except Exception:
                     pass
-            # Diagnostic: dump what we see
-            diag = await page.evaluate("""() => {
-                const inputs = document.querySelectorAll("input[type='number'], input[inputmode='numeric'], [role='spinbutton']");
-                const trCount = document.querySelectorAll('tr').length;
-                let shadowInputs = 0;
-                document.querySelectorAll('*').forEach(el => {
-                    if (el.shadowRoot) {
-                        shadowInputs += el.shadowRoot.querySelectorAll("input[type='number'], input[inputmode='numeric'], [role='spinbutton']").length;
-                    }
-                });
-                return {inputCount: inputs.length, trCount, shadowInputs, url: window.location.href};
+            diag = await builder.evaluate("""() => {
+                function deepQuery(root, selector) {
+                    let results = [...root.querySelectorAll(selector)];
+                    root.querySelectorAll('*').forEach(el => {
+                        if (el.shadowRoot) results.push(...deepQuery(el.shadowRoot, selector));
+                    });
+                    return results;
+                }
+                const inputs = deepQuery(document, "input[type='number'], input[inputmode='numeric'], [role='spinbutton']");
+                const allInputs = deepQuery(document, "input");
+                const bodyText = document.body ? document.body.textContent.substring(0, 500) : 'no-body';
+                return {numericInputs: inputs.length, allInputs: allInputs.length, url: window.location.href, bodySnippet: bodyText};
             }""")
-            print(f"   [create_index] DOM diagnostic: {diag}", flush=True)
+            print(f"   [create_index] Builder DOM diagnostic: {diag}", flush=True)
         else:
             raise RuntimeError("Chunking numeric inputs never became visible after 4 click attempts on the PDF row.")
         # Max Tokens
