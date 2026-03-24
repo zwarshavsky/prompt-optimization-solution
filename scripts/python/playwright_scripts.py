@@ -159,60 +159,65 @@ async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout
                     output_line=f"🔐 MFA code submitted (attempt #{attempt_count}, len={len(code)}). Verifying...",
                 )
             if submitted:
-                # Wait for URL to leave the verification page (not just go to lightning)
-                print(f"   [MFA-WAIT] Waiting up to 60s for URL to leave verification page...", flush=True)
-                verification_left = False
-                for _poll in range(30):
-                    await asyncio.sleep(2)
-                    cur_url = page.url
-                    if not _is_mfa_or_verification_url(cur_url):
-                        print(f"   [MFA-WAIT] URL left verification page: {cur_url}", flush=True)
-                        verification_left = True
-                        break
-                    if _poll % 5 == 4:
-                        page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 300) : 'no-body'")
-                        print(f"   [MFA-WAIT] Still on verification URL (poll {_poll+1}/30). Text: {page_text[:200]}", flush=True)
+                # Wait a few seconds for form submission to process
+                print(f"   [MFA-WAIT] Waiting 8s for form submission to process...", flush=True)
+                await asyncio.sleep(8)
 
-                if not verification_left:
-                    page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 500) : 'no-body'")
-                    print(f"   [MFA-WAIT] ⚠️ Still on verification URL after 60s. URL: {page.url}", flush=True)
-                    print(f"   [MFA-WAIT] Page text: {page_text[:400]}", flush=True)
-
-                # Final check: did we land on an authenticated URL?
+                # Check if the page already navigated away
                 if _is_authenticated_url(page.url):
-                    print(f"   [MFA-WAIT] ✅ Authenticated! URL: {page.url}", flush=True)
+                    print(f"   [MFA-WAIT] ✅ Authenticated after form submit! URL: {page.url}", flush=True)
                     if run_id:
-                        update_job_progress(
-                            run_id,
-                            {
-                                "status": "step_start",
-                                "step": 1,
-                                "message": "MFA verification complete. Resuming workflow.",
-                                "mfa_required": False,
-                            },
-                            output_line="✅ MFA verification successful. Resuming workflow.",
-                        )
+                        update_job_progress(run_id, {"status": "step_start", "step": 1, "message": "MFA verification complete.", "mfa_required": False}, output_line="✅ MFA verification successful.")
                     return True
 
-                # Not authenticated yet - decide whether to retry same code or ask for new one
+                # The verification page often stays on the same URL after accepting
+                # the code (page text changes from full form to just "Salesforce").
+                # Force-navigate to Lightning to see if the session is now valid.
+                instance_base = page.url.split("/_ui/")[0] if "/_ui/" in page.url else page.url.split(".com")[0] + ".com"
+                lightning_url = f"{instance_base}/lightning/setup/SetupOneHome/home"
+                print(f"   [MFA-WAIT] Force-navigating to Lightning: {lightning_url}", flush=True)
+                try:
+                    await page.goto(lightning_url, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(3)
+                except Exception as nav_err:
+                    print(f"   [MFA-WAIT] Navigation error: {nav_err}", flush=True)
+
+                cur_url = page.url
+                print(f"   [MFA-WAIT] After force-nav, URL: {cur_url}", flush=True)
+
+                if _is_authenticated_url(cur_url):
+                    print(f"   [MFA-WAIT] ✅ Authenticated via force-nav! URL: {cur_url}", flush=True)
+                    if run_id:
+                        update_job_progress(run_id, {"status": "step_start", "step": 1, "message": "MFA verification complete.", "mfa_required": False}, output_line="✅ MFA verification successful.")
+                    return True
+
+                # If we got redirected back to MFA/login, the code was wrong or expired
+                page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 500) : 'no-body'")
+                print(f"   [MFA-WAIT] ⚠️ Still not authenticated. URL: {cur_url}", flush=True)
+                print(f"   [MFA-WAIT] Page text: {page_text[:400]}", flush=True)
+
+                # Navigate back to the original verification page for retry
+                if _is_mfa_or_verification_url(cur_url):
+                    print(f"   [MFA-WAIT] Already on verification page for retry.", flush=True)
+                else:
+                    # Go back to the login flow
+                    login_url = f"{instance_base}/secur/frontdoor.jsp?allp=1"
+                    print(f"   [MFA-WAIT] Navigating back to login: {login_url}", flush=True)
+                    try:
+                        await page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
+                        await asyncio.sleep(3)
+                    except Exception:
+                        pass
+
                 if current_code_retries < max_retries_same_code:
-                    print(f"   [MFA-WAIT] ⚠️ Not authenticated. Will retry same code ({current_code_retries}/{max_retries_same_code}).", flush=True)
+                    print(f"   [MFA-WAIT] ⚠️ Will retry same code ({current_code_retries}/{max_retries_same_code}).", flush=True)
                     if run_id:
                         reflag_mfa_code_pending(run_id)
                 else:
-                    print(f"   [MFA-WAIT] ❌ Max retries ({max_retries_same_code}) exhausted for this code. Requesting new code.", flush=True)
+                    print(f"   [MFA-WAIT] ❌ Max retries ({max_retries_same_code}) exhausted. Requesting new code.", flush=True)
                     current_code_retries = 0
                     if run_id:
-                        update_job_progress(
-                            run_id,
-                            {
-                                "status": "awaiting_mfa",
-                                "step": 1,
-                                "message": f"MFA code expired or invalid after {max_retries_same_code} attempts. Please submit a new code.",
-                                "mfa_required": True,
-                            },
-                            output_line=f"⚠️ MFA code failed after {max_retries_same_code} retries. Please submit a new code.",
-                        )
+                        update_job_progress(run_id, {"status": "awaiting_mfa", "step": 1, "message": f"MFA code failed after {max_retries_same_code} attempts. Please submit a new code.", "mfa_required": True}, output_line=f"⚠️ MFA code failed after {max_retries_same_code} retries. Please submit a new code.")
             else:
                 print(f"   [MFA-WAIT] ⚠️ _try_submit_mfa_code returned False (code entry or submit failed)", flush=True)
                 if run_id:
