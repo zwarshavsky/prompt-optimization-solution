@@ -22,7 +22,7 @@ import yaml
 
 from playwright.async_api import async_playwright
 
-from worker_utils import check_run_aborted, update_job_progress, consume_pending_mfa_code
+from worker_utils import check_run_aborted, update_job_progress, consume_pending_mfa_code, reflag_mfa_code_pending
 
 
 def _is_authenticated_url(url: str) -> bool:
@@ -38,6 +38,11 @@ def _is_mfa_or_verification_url(url: str) -> bool:
 
 
 async def _try_submit_mfa_code(page, code: str) -> bool:
+    print(f"   [MFA] _try_submit_mfa_code called with code len={len(code)}", flush=True)
+    print(f"   [MFA] Current URL: {page.url}", flush=True)
+    page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 400) : 'no-body'")
+    print(f"   [MFA] Page text: {page_text[:300]}", flush=True)
+
     code_locators = [
         "input[type='tel']",
         "input[type='number']",
@@ -53,13 +58,29 @@ async def _try_submit_mfa_code(page, code: str) -> bool:
         field = page.locator(selector).first
         try:
             if await field.is_visible(timeout=600):
+                print(f"   [MFA] Found input via '{selector}', filling code...", flush=True)
                 await field.fill(code)
                 entered = True
                 break
         except Exception:
             continue
     if not entered:
+        print("   [MFA] ❌ Could not find any input field for the verification code!", flush=True)
+        all_inputs = await page.evaluate("() => Array.from(document.querySelectorAll('input')).map(i => ({type:i.type, name:i.name, id:i.id, placeholder:i.placeholder})).slice(0,10)")
+        print(f"   [MFA] Available inputs on page: {all_inputs}", flush=True)
         return False
+
+    # Try to check "Don't ask again" to skip verification on future logins
+    try:
+        dont_ask = page.locator("text=Don't ask again").first
+        if await dont_ask.is_visible(timeout=600):
+            checkbox = page.locator("input[type='checkbox']").first
+            if await checkbox.is_visible(timeout=600):
+                if not await checkbox.is_checked():
+                    await checkbox.click()
+                    print("   [MFA] Checked 'Don't ask again'", flush=True)
+    except Exception:
+        pass
 
     submit_locators = [
         "button:has-text('Verify')",
@@ -73,14 +94,17 @@ async def _try_submit_mfa_code(page, code: str) -> bool:
         btn = page.locator(selector).first
         try:
             if await btn.is_visible(timeout=600):
+                print(f"   [MFA] Clicking submit via '{selector}'", flush=True)
                 await btn.click()
                 return True
         except Exception:
             continue
     try:
+        print("   [MFA] No submit button found, pressing Enter", flush=True)
         await page.keyboard.press("Enter")
         return True
     except Exception:
+        print("   [MFA] ❌ Enter keypress failed too", flush=True)
         return False
 
 
@@ -99,11 +123,16 @@ async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout
 
     started = asyncio.get_event_loop().time()
     last_heartbeat = started
+    attempt_count = 0
+    print(f"   [MFA-WAIT] Entering MFA wait loop (timeout={timeout_seconds}s, run_id={run_id})", flush=True)
     while True:
         if should_abort():
+            print("   [MFA-WAIT] Abort signal received", flush=True)
             return False
         now = asyncio.get_event_loop().time()
+        elapsed = int(now - started)
         if (now - started) > timeout_seconds:
+            print(f"   [MFA-WAIT] ❌ Timeout after {elapsed}s", flush=True)
             if run_id:
                 update_job_progress(
                     run_id,
@@ -114,24 +143,33 @@ async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout
 
         code = consume_pending_mfa_code(run_id) if run_id else None
         if code:
+            attempt_count += 1
+            print(f"   [MFA-WAIT] 🔑 Code consumed (attempt #{attempt_count}, len={len(code)}, elapsed={elapsed}s)", flush=True)
             submitted = await _try_submit_mfa_code(page, code)
+            print(f"   [MFA-WAIT] _try_submit_mfa_code returned: {submitted}", flush=True)
             if run_id:
                 update_job_progress(
                     run_id,
                     {
                         "status": "awaiting_mfa",
                         "step": 1,
-                        "message": "MFA code submitted, verifying login...",
+                        "message": f"MFA code submitted (attempt #{attempt_count}), verifying login...",
                         "mfa_required": True,
                     },
-                    output_line=f"🔐 MFA code submitted (len={len(code)}). Verifying...",
+                    output_line=f"🔐 MFA code submitted (attempt #{attempt_count}, len={len(code)}). Verifying...",
                 )
             if submitted:
+                print(f"   [MFA-WAIT] Waiting up to 45s for URL to become **/lightning/**", flush=True)
                 try:
                     await page.wait_for_url("**/lightning/**", timeout=45000)
-                except Exception:
+                    print(f"   [MFA-WAIT] URL changed to: {page.url}", flush=True)
+                except Exception as e:
+                    print(f"   [MFA-WAIT] URL wait timed out. Current URL: {page.url}", flush=True)
+                    page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 400) : 'no-body'")
+                    print(f"   [MFA-WAIT] Page text after timeout: {page_text[:300]}", flush=True)
                     await asyncio.sleep(1)
                 if _is_authenticated_url(page.url):
+                    print(f"   [MFA-WAIT] ✅ Authenticated! URL: {page.url}", flush=True)
                     if run_id:
                         update_job_progress(
                             run_id,
@@ -144,26 +182,41 @@ async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout
                             output_line="✅ MFA verification successful. Resuming workflow.",
                         )
                     return True
+                print(f"   [MFA-WAIT] ⚠️ Not authenticated after code submit. URL: {page.url}", flush=True)
+                if run_id:
+                    reflag_mfa_code_pending(run_id)
+                    print(f"   [MFA-WAIT] Re-flagged code as pending for automatic retry", flush=True)
+                    update_job_progress(
+                        run_id,
+                        {
+                            "status": "awaiting_mfa",
+                            "step": 1,
+                            "message": f"MFA code (attempt #{attempt_count}) did not authenticate. Retrying automatically...",
+                            "mfa_required": True,
+                        },
+                        output_line=f"⚠️ MFA attempt #{attempt_count} didn't authenticate. Auto-retrying...",
+                    )
+            else:
+                print(f"   [MFA-WAIT] ⚠️ _try_submit_mfa_code returned False (code entry or submit failed)", flush=True)
                 if run_id:
                     update_job_progress(
                         run_id,
                         {
                             "status": "awaiting_mfa",
                             "step": 1,
-                            "message": "MFA code invalid or verification still required. Submit another code.",
+                            "message": f"Could not enter MFA code on page (attempt #{attempt_count}). Submit another code.",
                             "mfa_required": True,
                         },
-                        output_line="⚠️ MFA verification still required. Please submit a new code.",
+                        output_line=f"⚠️ MFA code entry failed (attempt #{attempt_count}). Please submit a new code.",
                     )
 
-        # keep heartbeat alive while waiting
         if run_id and (now - last_heartbeat) >= 10:
             update_job_progress(
                 run_id,
                 {
                     "status": "awaiting_mfa",
                     "step": 1,
-                    "message": "Still waiting for MFA code submission.",
+                    "message": f"Still waiting for MFA code submission. ({elapsed}s elapsed, {attempt_count} attempts so far)",
                     "mfa_required": True,
                 },
             )

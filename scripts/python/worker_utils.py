@@ -492,6 +492,35 @@ def submit_mfa_code(run_id: str, code: str) -> bool:
         conn.close()
 
 
+def reflag_mfa_code_pending(run_id: str) -> None:
+    """Re-set mfa_code_pending=True so the worker retries the same code."""
+    if not run_id:
+        return
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE runs
+                SET checkpoint_info = jsonb_set(
+                    COALESCE(checkpoint_info, '{}'::jsonb),
+                    '{mfa_code_pending}', 'true'::jsonb
+                ),
+                updated_at = CURRENT_TIMESTAMP
+                WHERE run_id = %s AND checkpoint_info->>'mfa_code' IS NOT NULL
+                """,
+                (run_id,),
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"Error re-flagging MFA code for {run_id}: {e}", flush=True)
+        conn.rollback()
+    finally:
+        conn.close()
+
+
 def consume_pending_mfa_code(run_id: str) -> Optional[str]:
     """Atomically consume a pending MFA code from checkpoint_info."""
     if not run_id:
