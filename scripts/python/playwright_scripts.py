@@ -2098,27 +2098,10 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
         await asyncio.sleep(1)
         pdf_row = builder.locator("tr").filter(has_text="pdf").first
         await pdf_row.wait_for(state="visible", timeout=15000)
+        await pdf_row.click()
+        await asyncio.sleep(3)
         chunk_inputs = builder.locator("input[type='number'], input[inputmode='numeric'], [role='spinbutton']")
-        chunk_ready = False
-        last_chunk_err = None
-        for attempt in range(1, 4):
-            try:
-                await pdf_row.click()
-                # The chunking editor can mount slowly after MFA resume; wait for expansion text first.
-                await builder.locator("text=Max Tokens, text=Overlap tokens").first.wait_for(state="visible", timeout=15000)
-                await chunk_inputs.nth(0).wait_for(state="visible", timeout=15000)
-                if await chunk_inputs.count() >= 2:
-                    chunk_ready = True
-                    break
-            except Exception as e:
-                last_chunk_err = e
-                print(f"   [create_index] Chunking inputs not ready (attempt {attempt}/3): {e}", flush=True)
-                await asyncio.sleep(2)
-        if not chunk_ready:
-            raise RuntimeError(
-                "Chunking numeric inputs did not become visible after retries."
-                f" Last error: {last_chunk_err}"
-            )
+        await chunk_inputs.nth(0).wait_for(state="visible", timeout=20000)
         # Max Tokens
         max_tokens_input = chunk_inputs.nth(0)
         await max_tokens_input.click()
