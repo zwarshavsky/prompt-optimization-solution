@@ -70,15 +70,12 @@ async def _try_submit_mfa_code(page, code: str) -> bool:
         print(f"   [MFA] Available inputs on page: {all_inputs}", flush=True)
         return False
 
-    # Try to check "Don't ask again" to skip verification on future logins
     try:
-        dont_ask = page.locator("text=Don't ask again").first
-        if await dont_ask.is_visible(timeout=600):
-            checkbox = page.locator("input[type='checkbox']").first
-            if await checkbox.is_visible(timeout=600):
-                if not await checkbox.is_checked():
-                    await checkbox.click()
-                    print("   [MFA] Checked 'Don't ask again'", flush=True)
+        checkbox = page.locator("input[type='checkbox']").first
+        if await checkbox.is_visible(timeout=600):
+            if not await checkbox.is_checked():
+                await checkbox.click()
+                print("   [MFA] Checked 'Don't ask again' checkbox", flush=True)
     except Exception:
         pass
 
@@ -124,6 +121,8 @@ async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout
     started = asyncio.get_event_loop().time()
     last_heartbeat = started
     attempt_count = 0
+    max_retries_same_code = 2
+    current_code_retries = 0
     print(f"   [MFA-WAIT] Entering MFA wait loop (timeout={timeout_seconds}s, run_id={run_id})", flush=True)
     while True:
         if should_abort():
@@ -144,7 +143,8 @@ async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout
         code = consume_pending_mfa_code(run_id) if run_id else None
         if code:
             attempt_count += 1
-            print(f"   [MFA-WAIT] 🔑 Code consumed (attempt #{attempt_count}, len={len(code)}, elapsed={elapsed}s)", flush=True)
+            current_code_retries += 1
+            print(f"   [MFA-WAIT] 🔑 Code consumed (attempt #{attempt_count}, retry #{current_code_retries}, len={len(code)}, elapsed={elapsed}s)", flush=True)
             submitted = await _try_submit_mfa_code(page, code)
             print(f"   [MFA-WAIT] _try_submit_mfa_code returned: {submitted}", flush=True)
             if run_id:
@@ -159,15 +159,26 @@ async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout
                     output_line=f"🔐 MFA code submitted (attempt #{attempt_count}, len={len(code)}). Verifying...",
                 )
             if submitted:
-                print(f"   [MFA-WAIT] Waiting up to 45s for URL to become **/lightning/**", flush=True)
-                try:
-                    await page.wait_for_url("**/lightning/**", timeout=45000)
-                    print(f"   [MFA-WAIT] URL changed to: {page.url}", flush=True)
-                except Exception as e:
-                    print(f"   [MFA-WAIT] URL wait timed out. Current URL: {page.url}", flush=True)
-                    page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 400) : 'no-body'")
-                    print(f"   [MFA-WAIT] Page text after timeout: {page_text[:300]}", flush=True)
-                    await asyncio.sleep(1)
+                # Wait for URL to leave the verification page (not just go to lightning)
+                print(f"   [MFA-WAIT] Waiting up to 60s for URL to leave verification page...", flush=True)
+                verification_left = False
+                for _poll in range(30):
+                    await asyncio.sleep(2)
+                    cur_url = page.url
+                    if not _is_mfa_or_verification_url(cur_url):
+                        print(f"   [MFA-WAIT] URL left verification page: {cur_url}", flush=True)
+                        verification_left = True
+                        break
+                    if _poll % 5 == 4:
+                        page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 300) : 'no-body'")
+                        print(f"   [MFA-WAIT] Still on verification URL (poll {_poll+1}/30). Text: {page_text[:200]}", flush=True)
+
+                if not verification_left:
+                    page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 500) : 'no-body'")
+                    print(f"   [MFA-WAIT] ⚠️ Still on verification URL after 60s. URL: {page.url}", flush=True)
+                    print(f"   [MFA-WAIT] Page text: {page_text[:400]}", flush=True)
+
+                # Final check: did we land on an authenticated URL?
                 if _is_authenticated_url(page.url):
                     print(f"   [MFA-WAIT] ✅ Authenticated! URL: {page.url}", flush=True)
                     if run_id:
@@ -182,20 +193,26 @@ async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout
                             output_line="✅ MFA verification successful. Resuming workflow.",
                         )
                     return True
-                print(f"   [MFA-WAIT] ⚠️ Not authenticated after code submit. URL: {page.url}", flush=True)
-                if run_id:
-                    reflag_mfa_code_pending(run_id)
-                    print(f"   [MFA-WAIT] Re-flagged code as pending for automatic retry", flush=True)
-                    update_job_progress(
-                        run_id,
-                        {
-                            "status": "awaiting_mfa",
-                            "step": 1,
-                            "message": f"MFA code (attempt #{attempt_count}) did not authenticate. Retrying automatically...",
-                            "mfa_required": True,
-                        },
-                        output_line=f"⚠️ MFA attempt #{attempt_count} didn't authenticate. Auto-retrying...",
-                    )
+
+                # Not authenticated yet - decide whether to retry same code or ask for new one
+                if current_code_retries < max_retries_same_code:
+                    print(f"   [MFA-WAIT] ⚠️ Not authenticated. Will retry same code ({current_code_retries}/{max_retries_same_code}).", flush=True)
+                    if run_id:
+                        reflag_mfa_code_pending(run_id)
+                else:
+                    print(f"   [MFA-WAIT] ❌ Max retries ({max_retries_same_code}) exhausted for this code. Requesting new code.", flush=True)
+                    current_code_retries = 0
+                    if run_id:
+                        update_job_progress(
+                            run_id,
+                            {
+                                "status": "awaiting_mfa",
+                                "step": 1,
+                                "message": f"MFA code expired or invalid after {max_retries_same_code} attempts. Please submit a new code.",
+                                "mfa_required": True,
+                            },
+                            output_line=f"⚠️ MFA code failed after {max_retries_same_code} retries. Please submit a new code.",
+                        )
             else:
                 print(f"   [MFA-WAIT] ⚠️ _try_submit_mfa_code returned False (code entry or submit failed)", flush=True)
                 if run_id:
