@@ -458,3 +458,90 @@ def check_run_aborted(run_id: Optional[str]) -> bool:
     finally:
         conn.close()
 
+
+def submit_mfa_code(run_id: str, code: str) -> bool:
+    """Store MFA code for a run so Playwright can consume it."""
+    if not run_id or not code:
+        return False
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        payload = {
+            "mfa_code": str(code),
+            "mfa_code_pending": True,
+            "mfa_code_submitted_at": datetime.now().isoformat(),
+        }
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE runs
+                SET checkpoint_info = COALESCE(checkpoint_info, '{}'::jsonb) || %s::jsonb,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE run_id = %s
+                """,
+                (json.dumps(payload), run_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+    except Exception as e:
+        print(f"Error submitting MFA code for {run_id}: {e}", flush=True)
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def consume_pending_mfa_code(run_id: str) -> Optional[str]:
+    """Atomically consume a pending MFA code from checkpoint_info."""
+    if not run_id:
+        return None
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT checkpoint_info FROM runs WHERE run_id = %s FOR UPDATE", (run_id,))
+            row = cur.fetchone()
+            if not row or not row[0]:
+                conn.commit()
+                return None
+            info = row[0] if isinstance(row[0], dict) else {}
+            if not info.get("mfa_code_pending"):
+                conn.commit()
+                return None
+            code = (info.get("mfa_code") or "").strip()
+            if not code:
+                info["mfa_code_pending"] = False
+                cur.execute(
+                    """
+                    UPDATE runs
+                    SET checkpoint_info = %s::jsonb,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE run_id = %s
+                    """,
+                    (json.dumps(info), run_id),
+                )
+                conn.commit()
+                return None
+
+            info["mfa_code_pending"] = False
+            info["mfa_code_last_used_at"] = datetime.now().isoformat()
+            cur.execute(
+                """
+                UPDATE runs
+                SET checkpoint_info = %s::jsonb,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE run_id = %s
+                """,
+                (json.dumps(info), run_id),
+            )
+            conn.commit()
+            return code
+    except Exception as e:
+        print(f"Error consuming MFA code for {run_id}: {e}", flush=True)
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+

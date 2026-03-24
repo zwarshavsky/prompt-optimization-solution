@@ -22,7 +22,153 @@ import yaml
 
 from playwright.async_api import async_playwright
 
-from worker_utils import check_run_aborted
+from worker_utils import check_run_aborted, update_job_progress, consume_pending_mfa_code
+
+
+def _is_authenticated_url(url: str) -> bool:
+    low = (url or "").lower()
+    return ("lightning" in low) or (
+        "salesforce.com" in low and "login" not in low and "/_ui/identity/verification/" not in low
+    )
+
+
+def _is_mfa_or_verification_url(url: str) -> bool:
+    low = (url or "").lower()
+    return any(token in low for token in ["/_ui/identity/verification/", "mfa", "verify", "challenge"])
+
+
+async def _try_submit_mfa_code(page, code: str) -> bool:
+    code_locators = [
+        "input[type='tel']",
+        "input[type='number']",
+        "input[type='text']",
+        "input[name*='code' i]",
+        "input[id*='code' i]",
+        "input[name*='verification' i]",
+        "input[id*='verification' i]",
+        "input[autocomplete='one-time-code']",
+    ]
+    entered = False
+    for selector in code_locators:
+        field = page.locator(selector).first
+        try:
+            if await field.is_visible(timeout=600):
+                await field.fill(code)
+                entered = True
+                break
+        except Exception:
+            continue
+    if not entered:
+        return False
+
+    submit_locators = [
+        "button:has-text('Verify')",
+        "button:has-text('Continue')",
+        "button:has-text('Submit')",
+        "button:has-text('Next')",
+        "input[type='submit']",
+        "button[type='submit']",
+    ]
+    for selector in submit_locators:
+        btn = page.locator(selector).first
+        try:
+            if await btn.is_visible(timeout=600):
+                await btn.click()
+                return True
+        except Exception:
+            continue
+    try:
+        await page.keyboard.press("Enter")
+        return True
+    except Exception:
+        return False
+
+
+async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout_seconds: int = 600) -> bool:
+    if run_id:
+        update_job_progress(
+            run_id,
+            {
+                "status": "awaiting_mfa",
+                "step": 1,
+                "message": "MFA verification required. Enter code from Jobs page to continue.",
+                "mfa_required": True,
+            },
+            output_line="🔐 MFA required: waiting for verification code submission from Jobs page.",
+        )
+
+    started = asyncio.get_event_loop().time()
+    last_heartbeat = started
+    while True:
+        if should_abort():
+            return False
+        now = asyncio.get_event_loop().time()
+        if (now - started) > timeout_seconds:
+            if run_id:
+                update_job_progress(
+                    run_id,
+                    {"status": "error", "message": "MFA timeout waiting for verification code."},
+                    output_line="❌ MFA timeout: no verification code submitted in time.",
+                )
+            return False
+
+        code = consume_pending_mfa_code(run_id) if run_id else None
+        if code:
+            submitted = await _try_submit_mfa_code(page, code)
+            if run_id:
+                update_job_progress(
+                    run_id,
+                    {
+                        "status": "awaiting_mfa",
+                        "step": 1,
+                        "message": "MFA code submitted, verifying login...",
+                        "mfa_required": True,
+                    },
+                    output_line=f"🔐 MFA code submitted (len={len(code)}). Verifying...",
+                )
+            if submitted:
+                try:
+                    await page.wait_for_url("**/lightning/**", timeout=45000)
+                except Exception:
+                    await asyncio.sleep(1)
+                if _is_authenticated_url(page.url):
+                    if run_id:
+                        update_job_progress(
+                            run_id,
+                            {
+                                "status": "step_start",
+                                "step": 1,
+                                "message": "MFA verification complete. Resuming workflow.",
+                                "mfa_required": False,
+                            },
+                            output_line="✅ MFA verification successful. Resuming workflow.",
+                        )
+                    return True
+                if run_id:
+                    update_job_progress(
+                        run_id,
+                        {
+                            "status": "awaiting_mfa",
+                            "step": 1,
+                            "message": "MFA code invalid or verification still required. Submit another code.",
+                            "mfa_required": True,
+                        },
+                        output_line="⚠️ MFA verification still required. Please submit a new code.",
+                    )
+
+        # keep heartbeat alive while waiting
+        if run_id and (now - last_heartbeat) >= 10:
+            update_job_progress(
+                run_id,
+                {
+                    "status": "awaiting_mfa",
+                    "step": 1,
+                    "message": "Still waiting for MFA code submission.",
+                    "mfa_required": True,
+                },
+            )
+            last_heartbeat = now
+        await asyncio.sleep(2)
 
 async def update_search_index_prompt(
     username: str,
@@ -1883,7 +2029,19 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
         await page.get_by_role("textbox", name="Username").fill(username)
         await page.get_by_role("textbox", name="Password").fill(password)
         await page.get_by_role("button", name="Log In").click()
-        await page.wait_for_url(f"**{base.split('//')[1]}**", timeout=60000)
+        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        await asyncio.sleep(1)
+        current_url = page.url
+        if _is_mfa_or_verification_url(current_url):
+            print("   [create_index] MFA verification required.", flush=True)
+            resumed = await _wait_for_mfa_code_and_resume(page, run_id, should_abort, timeout_seconds=600)
+            if not resumed:
+                await browser.close()
+                return (None, None)
+        elif not _is_authenticated_url(current_url):
+            print(f"   ❌ Login did not reach authenticated URL. Current URL: {current_url}", flush=True)
+            await browser.close()
+            return (None, None)
         if should_abort():
             print("   ⚠️ DIAG: Abort after login, before Search Indexes", flush=True)
             await browser.close()
@@ -2068,7 +2226,19 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
         await page.get_by_role("textbox", name="Username").fill(username)
         await page.get_by_role("textbox", name="Password").fill(password)
         await page.get_by_role("button", name="Log In").click()
-        await page.wait_for_url(f"**{base.split('//')[1]}**", timeout=60000)
+        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        await asyncio.sleep(1)
+        current_url = page.url
+        if _is_mfa_or_verification_url(current_url):
+            print("   [create_retriever] MFA verification required.", flush=True)
+            resumed = await _wait_for_mfa_code_and_resume(page, run_id, should_abort, timeout_seconds=600)
+            if not resumed:
+                await browser.close()
+                return ("", False)
+        elif not _is_authenticated_url(current_url):
+            print(f"   ❌ Login did not reach authenticated URL. Current URL: {current_url}", flush=True)
+            await browser.close()
+            return ("", False)
         if should_abort():
             await browser.close()
             return ("", False)

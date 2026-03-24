@@ -343,6 +343,40 @@ def kill_job(run_id: str) -> bool:
     finally:
         conn.close()
 
+
+def submit_mfa_code_for_run(run_id: str, mfa_code: str) -> bool:
+    """Store MFA verification code for a run (worker consumes it)."""
+    code = (mfa_code or "").strip()
+    if not run_id or not code:
+        return False
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        payload = {
+            "mfa_code": code,
+            "mfa_code_pending": True,
+            "mfa_code_submitted_at": datetime.now().isoformat(),
+        }
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE runs
+                SET checkpoint_info = COALESCE(checkpoint_info, '{}'::jsonb) || %s::jsonb,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE run_id = %s
+                """,
+                (json.dumps(payload), run_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+    except Exception as e:
+        print(f"Error submitting MFA code for {run_id}: {e}", flush=True)
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
 def load_pdfs_from_db(run_id: str, output_dir: str = None) -> List[str]:
     """Load PDF files from Postgres database and save to filesystem"""
     conn = get_db_connection()
@@ -970,11 +1004,21 @@ if 'current_run' not in st.session_state:
     st.session_state.current_run = running_runs[0] if running_runs else None
 if 'show_create_modal' not in st.session_state:
     st.session_state.show_create_modal = False
+if 'show_mfa_modal_for' not in st.session_state:
+    st.session_state.show_mfa_modal_for = None
 if 'fallback_models' not in st.session_state:
     st.session_state.fallback_models = [""]
 if 'questions' not in st.session_state:
     st.session_state.questions = [{"number": "Q1", "text": "", "expectedAnswer": ""}]
 # Removed pdf_directory_path - PDFs must be uploaded via file uploader only
+
+
+def open_mfa_modal(run_id: str):
+    st.session_state.show_mfa_modal_for = run_id
+
+
+def close_mfa_modal():
+    st.session_state.show_mfa_modal_for = None
 
 # Helpers for dynamic add/remove without HTML/JS handlers
 def _configuration_prompt_inputs(yaml_dict: Any) -> List[Dict[str, Any]]:
@@ -2560,6 +2604,8 @@ elif page == "Jobs":
             """Extract data for table row display"""
             run_id = run['run_id']
             status = run.get('status', 'unknown')
+            progress = run.get('progress', {})
+            awaiting_mfa = progress.get('status') == 'awaiting_mfa'
             
             # Get config info
             config = run.get('config', {})
@@ -2585,7 +2631,10 @@ elif page == "Jobs":
                 completed_at_str = 'In Progress' if status == 'running' else 'N/A'
             
             # Status icon and label (no duplicates)
-            if status == 'running':
+            if status == 'running' and awaiting_mfa:
+                status_icon = "🔐"
+                status_label = "Awaiting MFA"
+            elif status == 'running':
                 status_icon = "🔄"
                 status_label = "Running"
             elif status == 'completed':
@@ -2639,7 +2688,9 @@ elif page == "Jobs":
                 3: 'Analyzing Results with Gemini'
             }
             
-            if status == 'running' and current_step > 0:
+            if status == 'running' and awaiting_mfa:
+                current_step_display = "Waiting for MFA code input"
+            elif status == 'running' and current_step > 0:
                 current_step_display = f"Cycle {current_cycle} - Step {current_step}/3: {step_names.get(current_step, f'Step {current_step}')}"
             elif status == 'running' and current_cycle > 0:
                 current_step_display = f"Cycle {current_cycle} - Initializing"
@@ -2735,6 +2786,11 @@ elif page == "Jobs":
                             st.rerun()
                         else:
                             st.error(f"❌ Failed to kill job {run_id}")
+                    run_progress = run.get('progress', {}) or {}
+                    if run_progress.get('status') == 'awaiting_mfa':
+                        if st.button("🔐 Enter MFA", key=f"mfa_{run_id}", use_container_width=True):
+                            open_mfa_modal(run_id)
+                            st.rerun()
                 else:
                     st.markdown("—")
             
@@ -2831,7 +2887,11 @@ elif page == "Jobs":
                 job_status = run.get('status', 'unknown')
                 
                 # Build detailed status text
-                if job_status == 'running' and progress.get('status') == 'starting':
+                if progress.get('status') == 'awaiting_mfa':
+                    status_icon = "🔐"
+                    status_text = "Awaiting MFA verification code"
+                    status_message = progress.get('message') or "Submit code from Jobs table to resume."
+                elif job_status == 'running' and progress.get('status') == 'starting':
                     status_text = "Initializing workflow..."
                 elif progress.get('status') == 'cycle_start':
                     status_text = f"Cycle {current_cycle} - Starting"
@@ -3019,6 +3079,44 @@ elif page == "Jobs":
                             )
                     else:
                         st.warning(f"⚠️ File not found at: {excel_file}")
+        # MFA modal (rendered when user clicks "Enter MFA")
+        selected_mfa_run = st.session_state.get('show_mfa_modal_for')
+        if selected_mfa_run:
+            if hasattr(st, "dialog"):
+                @st.dialog("Enter MFA Verification Code")
+                def _mfa_dialog():
+                    st.caption(f"Run: `{selected_mfa_run}`")
+                    st.write("Enter the one-time verification code from Salesforce.")
+                    with st.form(f"mfa_form_{selected_mfa_run}", clear_on_submit=True):
+                        mfa_code = st.text_input("Verification code", type="password", key=f"mfa_code_input_{selected_mfa_run}")
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            submit = st.form_submit_button("Submit code", type="primary", use_container_width=True)
+                        with col_b:
+                            cancel = st.form_submit_button("Cancel", use_container_width=True)
+                        if submit:
+                            if submit_mfa_code_for_run(selected_mfa_run, mfa_code):
+                                st.success("Code submitted. Worker will resume if valid.")
+                                close_mfa_modal()
+                                st.rerun()
+                            else:
+                                st.error("Failed to submit code. Try again.")
+                        if cancel:
+                            close_mfa_modal()
+                            st.rerun()
+
+                _mfa_dialog()
+            else:
+                st.warning("Your Streamlit version does not support dialog modals. Use the latest Streamlit for MFA modal support.")
+                with st.form(f"mfa_form_inline_{selected_mfa_run}", clear_on_submit=True):
+                    mfa_code = st.text_input("Verification code", type="password", key=f"mfa_inline_{selected_mfa_run}")
+                    if st.form_submit_button("Submit code", type="primary"):
+                        if submit_mfa_code_for_run(selected_mfa_run, mfa_code):
+                            st.success("Code submitted.")
+                            close_mfa_modal()
+                            st.rerun()
+                        else:
+                            st.error("Failed to submit code.")
     else:
         st.info("ℹ️ No jobs found. Click 'Create New Run' to start a workflow.")
 
