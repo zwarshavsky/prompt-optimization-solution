@@ -2100,13 +2100,62 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
         await pdf_row.wait_for(state="visible", timeout=15000)
         chunk_inputs = builder.locator("input[type='number'], input[inputmode='numeric'], [role='spinbutton']")
         for _click_attempt in range(1, 5):
-            await pdf_row.click()
-            try:
-                await chunk_inputs.nth(0).wait_for(state="visible", timeout=10000)
-                break
-            except Exception:
-                print(f"   [create_index] Chunking inputs not visible after click attempt {_click_attempt}/4, retrying...", flush=True)
-                await asyncio.sleep(2)
+            if _click_attempt <= 2:
+                await pdf_row.click()
+            else:
+                await pdf_row.click(force=True)
+            await asyncio.sleep(2)
+            if await chunk_inputs.count() >= 2:
+                try:
+                    await chunk_inputs.nth(0).wait_for(state="visible", timeout=5000)
+                    break
+                except Exception:
+                    pass
+            # JS fallback: find the row and dispatch a click event directly
+            print(f"   [create_index] Attempt {_click_attempt}/4: Playwright click didn't expand chunking. Trying JS click...", flush=True)
+            await page.evaluate("""() => {
+                const rows = document.querySelectorAll('tr');
+                for (const row of rows) {
+                    if (row.textContent && row.textContent.includes('pdf')) {
+                        row.click();
+                        return 'clicked-tr';
+                    }
+                }
+                // Search inside shadow DOMs
+                const allHosts = document.querySelectorAll('*');
+                for (const host of allHosts) {
+                    if (host.shadowRoot) {
+                        const sRows = host.shadowRoot.querySelectorAll('tr');
+                        for (const sr of sRows) {
+                            if (sr.textContent && sr.textContent.includes('pdf')) {
+                                sr.click();
+                                return 'clicked-shadow-tr';
+                            }
+                        }
+                    }
+                }
+                return 'no-pdf-row-found';
+            }""")
+            await asyncio.sleep(3)
+            if await chunk_inputs.count() >= 2:
+                try:
+                    await chunk_inputs.nth(0).wait_for(state="visible", timeout=5000)
+                    break
+                except Exception:
+                    pass
+            # Diagnostic: dump what we see
+            diag = await page.evaluate("""() => {
+                const inputs = document.querySelectorAll("input[type='number'], input[inputmode='numeric'], [role='spinbutton']");
+                const trCount = document.querySelectorAll('tr').length;
+                let shadowInputs = 0;
+                document.querySelectorAll('*').forEach(el => {
+                    if (el.shadowRoot) {
+                        shadowInputs += el.shadowRoot.querySelectorAll("input[type='number'], input[inputmode='numeric'], [role='spinbutton']").length;
+                    }
+                });
+                return {inputCount: inputs.length, trCount, shadowInputs, url: window.location.href};
+            }""")
+            print(f"   [create_index] DOM diagnostic: {diag}", flush=True)
         else:
             raise RuntimeError("Chunking numeric inputs never became visible after 4 click attempts on the PDF row.")
         # Max Tokens
