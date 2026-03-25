@@ -76,8 +76,9 @@ BASELINE_OBJECT_NEW_FALLBACK = """            except Exception:
 BASELINE_SETUP_URL_LINE = '        setup_url = f"{base}/lightning/setup/DataSemanticSearch/home"'
 
 SETUP_URL_CANDIDATES_BLOCK = """        setup_candidates = [
-            f"{base}/lightning/setup/DataSemanticSearch/home",
+            f"{base}/lightning/setup/SetupOneHome/home",
             f"{base}/lightning/setup/SemanticSearch/home",
+            f"{base}/lightning/setup/DataSemanticSearch/home",
             f"{base}/lightning/setup/EinsteinSearch/home",
         ]
         setup_url = setup_candidates[0]
@@ -88,6 +89,10 @@ SETUP_URL_CANDIDATES_BLOCK = """        setup_candidates = [
                 t = (await page.title() or "").lower()
                 if "page not found" in t or "not found" in t:
                     print(f"   [create_index] setup candidate not usable: {cand} title={t}", flush=True)
+                    continue
+                has_quick_find = await page.get_by_placeholder("Quick Find").count()
+                if has_quick_find == 0:
+                    print(f"   [create_index] setup candidate missing Quick Find: {cand} title={t}", flush=True)
                     continue
                 setup_url = cand
                 print(f"   [create_index] setup candidate selected: {setup_url}", flush=True)
