@@ -2178,7 +2178,14 @@ async def _create_search_index_ui(
             await asyncio.sleep(1)
         print("   [create_index] Waiting for New button...", flush=True)
         new_btn = page.get_by_role("button", name="New")
-        await new_btn.wait_for(state="visible", timeout=25000)
+        try:
+            await new_btn.wait_for(state="visible", timeout=12000)
+        except Exception:
+            print("   [create_index] 'New' not visible on current page; trying SearchIndex list fallback URL...", flush=True)
+            # Fallback: go straight to the SearchIndex object list view where "New" is rendered.
+            await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(1.5)
+            await new_btn.wait_for(state="visible", timeout=30000)
         print("   [create_index] New→Advanced Setup→Next (builder popup)...", flush=True)
         await new_btn.click()
         await asyncio.sleep(0.5)
