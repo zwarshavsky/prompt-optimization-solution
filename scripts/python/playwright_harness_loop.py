@@ -132,13 +132,62 @@ TABLE_SAVE_REPLACEMENT = """        print("   [create_index] Save-gate: waiting 
 
             # Nudge validation and capture diagnostics while waiting.
             last_diag = await builder.evaluate(\"\"\"() => {
+                const allRoots = () => {
+                    const roots = [document];
+                    const seen = new Set([document]);
+                    const stack = [document];
+                    while (stack.length) {
+                        const root = stack.pop();
+                        if (!root || !root.querySelectorAll) continue;
+                        root.querySelectorAll('*').forEach((el) => {
+                            if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+                                seen.add(el.shadowRoot);
+                                roots.push(el.shadowRoot);
+                                stack.push(el.shadowRoot);
+                            }
+                            if (el.tagName === 'IFRAME') {
+                                try {
+                                    const d = el.contentDocument;
+                                    if (d && !seen.has(d)) {
+                                        seen.add(d);
+                                        roots.push(d);
+                                        stack.push(d);
+                                    }
+                                } catch (_) {}
+                            }
+                        });
+                    }
+                    return roots;
+                };
                 const isNum = (el) => {
                     const t = (el.getAttribute('type') || '').toLowerCase();
                     const im = (el.getAttribute('inputmode') || '').toLowerCase();
                     const role = (el.getAttribute('role') || '').toLowerCase();
                     return t === 'number' || im === 'numeric' || role === 'spinbutton';
                 };
-                const nums = Array.from(document.querySelectorAll('input, [role=\"spinbutton\"]')).filter(isNum);
+                const nums = [];
+                const saves = [];
+                const saveLabels = new Set(['save', 'save & build', 'build', 'finish']);
+                for (const r of allRoots()) {
+                    if (!r.querySelectorAll) continue;
+                    Array.from(r.querySelectorAll('input, [role=\"spinbutton\"]')).filter(isNum).forEach((n) => nums.push(n));
+                    r.querySelectorAll('button').forEach((b) => {
+                        const txt = ((b.innerText || b.textContent || '').trim() || '').toLowerCase();
+                        if (saveLabels.has(txt) || txt.includes('save')) {
+                            const disabled = !!b.disabled || b.getAttribute('aria-disabled') === 'true';
+                            saves.push({
+                                text: txt,
+                                disabled,
+                                ariaDisabled: b.getAttribute('aria-disabled'),
+                                cls: b.className || ''
+                            });
+                            // If enabled, click directly from page context (works across shadow/iframe roots).
+                            if (!disabled) {
+                                try { b.click(); } catch (_) {}
+                            }
+                        }
+                    });
+                }
                 nums.forEach((el) => {
                     try {
                         el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
@@ -146,14 +195,7 @@ TABLE_SAVE_REPLACEMENT = """        print("   [create_index] Save-gate: waiting 
                         el.dispatchEvent(new FocusEvent('blur', { bubbles: true, composed: true }));
                     } catch (_) {}
                 });
-                const saves = Array.from(document.querySelectorAll('button'))
-                    .filter((b) => ((b.innerText || b.textContent || '').trim() === 'Save'))
-                    .map((b) => ({
-                        disabled: !!b.disabled,
-                        ariaDisabled: b.getAttribute('aria-disabled'),
-                        cls: b.className || ''
-                    }));
-                return { numericInputs: nums.length, saves };
+                return { numericInputs: nums.length, savesCount: saves.length, saves: saves.slice(0, 8) };
             }\"\"\")
             if save_attempt % 5 == 0:
                 print(f"   [create_index] Save-gate wait attempt={save_attempt} diag={last_diag}", flush=True)
