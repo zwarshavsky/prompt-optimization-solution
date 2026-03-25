@@ -66,6 +66,31 @@ BASELINE_HYBRID_BLOCK = """        print("   [create_index] Builder opened. Hybr
         await searchbox.fill("rag")
 """
 
+BASELINE_OBJECT_NEW_FALLBACK = """            except Exception:
+                print("   [create_index] 'New' still not visible; opening SearchIndex new-record URL directly...", flush=True)
+                await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
+                await asyncio.sleep(1.0)
+                opened_new_flow_direct = True
+"""
+
+SETUP_ONLY_FALLBACK = """            except Exception:
+                print("   [create_index] 'New' still not visible on object pages; forcing setup-only re-entry.", flush=True)
+                await page.goto(setup_url, wait_until="domcontentloaded", timeout=60000)
+                await asyncio.sleep(1.0)
+                qf = page.get_by_placeholder("Quick Find")
+                try:
+                    await qf.wait_for(state="visible", timeout=8000)
+                    await qf.fill("Search Indexes")
+                    await asyncio.sleep(0.8)
+                    setup_link = page.get_by_role("link", name="Search Indexes").first
+                    await setup_link.click(timeout=10000)
+                    await page.wait_for_load_state("domcontentloaded", timeout=20000)
+                    await asyncio.sleep(0.8)
+                except Exception:
+                    pass
+                await new_btn.wait_for(state="visible", timeout=12000)
+"""
+
 
 STRATEGY_BLOCKS: dict[str, str] = {
     "baseline": BASELINE_HYBRID_BLOCK,
@@ -129,6 +154,10 @@ def _load_create_index_func(strategy: str) -> Callable:
     if strategy not in STRATEGY_BLOCKS:
         strategy = "baseline"
     replacement = STRATEGY_BLOCKS[strategy]
+    if strategy == "setup_only_recovery":
+        if BASELINE_OBJECT_NEW_FALLBACK not in source:
+            raise RuntimeError("Could not find object-new fallback block for setup_only_recovery strategy.")
+        source = source.replace(BASELINE_OBJECT_NEW_FALLBACK, SETUP_ONLY_FALLBACK, 1)
     if strategy != "baseline":
         if BASELINE_HYBRID_BLOCK not in source:
             raise RuntimeError("Could not find baseline hybrid block to patch for harness strategy.")
@@ -363,7 +392,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run-id", default=None, help="Optional fixed run_id (usually omit)")
     p.add_argument(
         "--strategies",
-        default="baseline,searchbox_first,hybrid_role_first,searchbox_only",
+        default="baseline,searchbox_first,hybrid_role_first,searchbox_only,setup_only_recovery",
         help="Comma-separated strategy sequence for harness-only rapid variants",
     )
     p.add_argument("--state-dir", default="scripts/python/state", help="State directory")
