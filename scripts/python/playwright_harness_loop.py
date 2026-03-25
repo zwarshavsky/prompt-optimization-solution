@@ -73,6 +73,30 @@ BASELINE_OBJECT_NEW_FALLBACK = """            except Exception:
                 opened_new_flow_direct = True
 """
 
+BASELINE_SETUP_URL_LINE = '        setup_url = f"{base}/lightning/setup/DataSemanticSearch/home"'
+
+SETUP_URL_CANDIDATES_BLOCK = """        setup_candidates = [
+            f"{base}/lightning/setup/DataSemanticSearch/home",
+            f"{base}/lightning/setup/SemanticSearch/home",
+            f"{base}/lightning/setup/EinsteinSearch/home",
+        ]
+        setup_url = setup_candidates[0]
+        for cand in setup_candidates:
+            try:
+                await page.goto(cand, wait_until="domcontentloaded", timeout=60000)
+                await asyncio.sleep(0.8)
+                t = (await page.title() or "").lower()
+                if "page not found" in t or "not found" in t:
+                    print(f"   [create_index] setup candidate not usable: {cand} title={t}", flush=True)
+                    continue
+                setup_url = cand
+                print(f"   [create_index] setup candidate selected: {setup_url}", flush=True)
+                break
+            except Exception as e:
+                print(f"   [create_index] setup candidate failed: {cand} err={e}", flush=True)
+                continue
+"""
+
 SETUP_ONLY_FALLBACK = """            except Exception:
                 print("   [create_index] 'New' still not visible on object pages; forcing setup-only re-entry.", flush=True)
                 await page.goto(setup_url, wait_until="domcontentloaded", timeout=60000)
@@ -154,6 +178,10 @@ def _load_create_index_func(strategy: str) -> Callable:
     if strategy not in STRATEGY_BLOCKS:
         strategy = "baseline"
     replacement = STRATEGY_BLOCKS[strategy]
+    if BASELINE_SETUP_URL_LINE in source:
+        source = source.replace(BASELINE_SETUP_URL_LINE, SETUP_URL_CANDIDATES_BLOCK, 1)
+    else:
+        print("[harness] WARN: setup_url line not found; candidate setup patch skipped.", flush=True)
     if strategy == "setup_only_recovery":
         if BASELINE_OBJECT_NEW_FALLBACK not in source:
             raise RuntimeError("Could not find object-new fallback block for setup_only_recovery strategy.")
