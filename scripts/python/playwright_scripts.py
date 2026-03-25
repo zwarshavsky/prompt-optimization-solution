@@ -2160,43 +2160,10 @@ async def _create_search_index_ui(
             print("   ⚠️ DIAG: Abort after login, before Search Indexes", flush=True)
             await browser.close()
             return (None, None)
-        print("   [create_index] Navigate to Search Indexes...", flush=True)
-        try:
-            # Some org layouts already land directly on Search Indexes and do not render
-            # the "Show more navigation items" control.
-            more_nav = page.get_by_role("button", name="Show more navigation items")
-            if await more_nav.is_visible(timeout=4000):
-                await more_nav.click(timeout=8000)
-                await page.get_by_role("menuitem", name="Search Indexes").click(timeout=12000)
-                await page.wait_for_load_state("domcontentloaded", timeout=20000)
-                await asyncio.sleep(1)
-            else:
-                print("   [create_index] Nav drawer button not visible; proceeding on current page.", flush=True)
-        except Exception as nav_err:
-            print(f"   [create_index] Nav drawer path failed ({nav_err}); retrying direct setup URL.", flush=True)
-            await page.goto(setup_url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(1)
-        print("   [create_index] Waiting for New button...", flush=True)
-        new_btn = page.get_by_role("button", name="New")
-        opened_new_flow_direct = False
-        try:
-            await new_btn.wait_for(state="visible", timeout=12000)
-        except Exception:
-            print("   [create_index] 'New' not visible on current page; trying SearchIndex list fallback URL...", flush=True)
-            # Fallback: go straight to the SearchIndex object list view where "New" is rendered.
-            await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(1.5)
-            try:
-                await new_btn.wait_for(state="visible", timeout=12000)
-            except Exception:
-                print("   [create_index] 'New' still not visible; opening SearchIndex new-record URL directly...", flush=True)
-                await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
-                await asyncio.sleep(1.0)
-                opened_new_flow_direct = True
-        print("   [create_index] New→Advanced Setup→Next (builder)...", flush=True)
-        if not opened_new_flow_direct:
-            await new_btn.click()
-            await asyncio.sleep(0.5)
+        print("   [create_index] Opening deterministic new-index route...", flush=True)
+        await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
+        await asyncio.sleep(1.0)
+        print("   [create_index] Advanced Setup → Next (deterministic flow)...", flush=True)
         advanced_clicked = False
         advanced_candidates = [
             page.get_by_text("Advanced Setup", exact=True),
@@ -2240,26 +2207,39 @@ async def _create_search_index_ui(
                 if (btn) btn.click();
             }""")
 
-        # Detect builder target deterministically without blocking on popup event.
-        await asyncio.sleep(2.0)
+        # Detect builder target deterministically: same tab preferred, newest page fallback.
+        await asyncio.sleep(1.5)
         builder = page
-        for p in reversed(context.pages):
-            try:
-                pu = (p.url or "").lower()
-                if p is not page and ("semanticsearch" in pu or "searchindex" in pu):
-                    builder = p
-                    break
-            except Exception:
-                continue
-        if builder is page and len(context.pages) > 1:
+        page_url = page.url.lower()
+        if "semanticsearch" not in page_url and "searchindex" not in page_url and len(context.pages) > 1:
             builder = context.pages[-1]
-        print("   [create_index] Builder selected from popup page." if builder is not page else "   [create_index] Builder selected from current page.", flush=True)
+            print("   [create_index] Builder selected from newest page.", flush=True)
+        else:
+            print("   [create_index] Builder selected from current page.", flush=True)
         await builder.wait_for_load_state("domcontentloaded")
         await asyncio.sleep(1)
         print(f"   [create_index] Builder candidate URL: {builder.url}", flush=True)
+        try:
+            print(f"   [create_index] Builder candidate title: {await builder.title()}", flush=True)
+        except Exception:
+            pass
         print("   [create_index] Builder opened. Hybrid + RagFileUDMO...", flush=True)
         hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
-        await hybrid_btn.wait_for(state="visible", timeout=15000)
+        try:
+            await hybrid_btn.wait_for(state="visible", timeout=8000)
+        except Exception:
+            # Deterministic one-time transition nudge: some layouts require another Next click.
+            print("   [create_index] Hybrid card not visible; retrying one explicit Next transition.", flush=True)
+            try:
+                await builder.get_by_role("button", name="Next").first.click(timeout=6000)
+            except Exception:
+                try:
+                    await builder.get_by_text("Next", exact=True).first.click(timeout=6000)
+                except Exception:
+                    pass
+            await asyncio.sleep(2.0)
+            print(f"   [create_index] Post-transition URL: {builder.url}", flush=True)
+            await hybrid_btn.wait_for(state="visible", timeout=15000)
         await hybrid_btn.click()
         await asyncio.sleep(0.5)
         searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
