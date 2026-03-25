@@ -2197,10 +2197,27 @@ async def _create_search_index_ui(
         if not opened_new_flow_direct:
             await new_btn.click()
             await asyncio.sleep(0.5)
-        await page.get_by_text("Advanced Setup", exact=True).click()
+        advanced_clicked = False
+        advanced_candidates = [
+            page.get_by_text("Advanced Setup", exact=True),
+            page.get_by_text("Advanced setup", exact=True),
+            page.get_by_role("button", name="Advanced Setup"),
+            page.get_by_role("button", name="Advanced setup"),
+            page.get_by_text("Advanced", exact=False).first,
+        ]
+        for cand in advanced_candidates:
+            try:
+                if await cand.is_visible(timeout=2500):
+                    await cand.click(timeout=8000)
+                    advanced_clicked = True
+                    break
+            except Exception:
+                pass
+        if not advanced_clicked:
+            print("   [create_index] ⚠️ Advanced Setup control not found; continuing to Next fallback.", flush=True)
         await asyncio.sleep(0.3)
         async with page.expect_popup(timeout=45000) as popup_info:
-            await page.get_by_role("button", name="Next").click()
+            await page.get_by_role("button", name="Next").first.click()
         builder = await popup_info.value
         await builder.wait_for_load_state("domcontentloaded")
         await asyncio.sleep(1)
