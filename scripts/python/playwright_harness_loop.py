@@ -91,11 +91,14 @@ SETUP_URL_CANDIDATES_BLOCK = """        setup_candidates = [
                 if "page not found" in t or "not found" in t:
                     print(f"   [create_index] setup candidate not usable: {cand} title={t}", flush=True)
                     continue
-                # Object-home route may redirect into a valid setup context where New is available.
-                if "/lightning/o/datasemanticsearch/home" in page.url.lower():
-                    setup_url = page.url
-                    print(f"   [create_index] object-home candidate selected: {setup_url}", flush=True)
-                    break
+                # If object-home path exposes New, accept it as the entry path immediately.
+                if "/lightning/o/datasemanticsearch/home" in cand.lower():
+                    new_btn_probe = page.get_by_role("button", name="New")
+                    if await new_btn_probe.count() > 0:
+                        setup_url = page.url
+                        print(f"   [create_index] object-home candidate selected (New visible): {setup_url}", flush=True)
+                        break
+                    print(f"   [create_index] object-home candidate reached but New not visible: {page.url}", flush=True)
                 has_quick_find = await page.get_by_placeholder("Quick Find").count()
                 if has_quick_find == 0:
                     print(f"   [create_index] setup candidate missing Quick Find: {cand} title={t}", flush=True)
