@@ -39,10 +39,26 @@ def _new_run_id() -> str:
     return f"harness_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
 
 
+def _resolve_yaml_path(path: Path) -> Path:
+    if path.exists():
+        return path
+    inputs_dir = Path("/app/inputs")
+    preferred = [
+        inputs_dir / "test_two_inputs.yaml",
+        inputs_dir / "prompt_optimization_input.yaml",
+    ]
+    for candidate in preferred:
+        if candidate.exists():
+            return candidate
+    matches = sorted(inputs_dir.glob("*.yaml"))
+    if matches:
+        return matches[0]
+    raise FileNotFoundError(f"YAML not found: {path} (and no *.yaml in /app/inputs)")
+
+
 def _load_yaml(path: Path) -> dict:
-    if not path.exists():
-        raise FileNotFoundError(f"YAML not found: {path}")
-    with path.open("r", encoding="utf-8") as f:
+    resolved = _resolve_yaml_path(path)
+    with resolved.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
@@ -98,13 +114,14 @@ async def _run_once(
     run_id: str,
     headless: bool,
 ) -> dict:
+    yaml_path = _resolve_yaml_path(yaml_path)
     cfg = _load_yaml(yaml_path)
     username, password, instance_url = _extract_sf(cfg)
     _, access_token = get_salesforce_credentials(
         username=username, password=password, instance_url=instance_url
     )
     index_name = get_next_index_name(instance_url, access_token, base_name=index_prefix)
-    _upsert_harness_run(run_id, "running", f"Harness attempt starting for {index_name}")
+    _upsert_harness_run(run_id, "running", f"Harness attempt starting for {index_name} using {yaml_path}")
 
     def should_abort() -> bool:
         return False
