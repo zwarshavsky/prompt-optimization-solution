@@ -2218,9 +2218,28 @@ async def _create_search_index_ui(
             print("   [create_index] Builder selected from current page.", flush=True)
         await builder.wait_for_load_state("domcontentloaded")
         await asyncio.sleep(1)
+        print(f"   [create_index] Builder candidate URL: {builder.url}", flush=True)
+        try:
+            print(f"   [create_index] Builder candidate title: {await builder.title()}", flush=True)
+        except Exception:
+            pass
         print("   [create_index] Builder opened. Hybrid + RagFileUDMO...", flush=True)
         hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
-        await hybrid_btn.wait_for(state="visible", timeout=15000)
+        try:
+            await hybrid_btn.wait_for(state="visible", timeout=8000)
+        except Exception:
+            # Deterministic one-time transition nudge: some layouts require another Next click.
+            print("   [create_index] Hybrid card not visible; retrying one explicit Next transition.", flush=True)
+            try:
+                await builder.get_by_role("button", name="Next").first.click(timeout=6000)
+            except Exception:
+                try:
+                    await builder.get_by_text("Next", exact=True).first.click(timeout=6000)
+                except Exception:
+                    pass
+            await asyncio.sleep(2.0)
+            print(f"   [create_index] Post-transition URL: {builder.url}", flush=True)
+            await hybrid_btn.wait_for(state="visible", timeout=15000)
         await hybrid_btn.click()
         await asyncio.sleep(0.5)
         searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
