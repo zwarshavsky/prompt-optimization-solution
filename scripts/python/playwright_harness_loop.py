@@ -42,7 +42,23 @@ def _new_run_id() -> str:
 
 BASELINE_HYBRID_BLOCK = """        print("   [create_index] Builder opened. Hybrid + RagFileUDMO...", flush=True)
         hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
-        await hybrid_btn.wait_for(state="visible", timeout=15000)
+        try:
+            await hybrid_btn.wait_for(state="visible", timeout=15000)
+        except Exception:
+            snap_path = state_dir / f"{run_id}_baseline_hybrid_missing.png"
+            await builder.screenshot(path=str(snap_path), full_page=True)
+            try:
+                summary = await builder.evaluate(\"\"\"() => {
+                    const txt = (el) => (el && (el.innerText || el.textContent || '').trim()) || '';
+                    const buttons = Array.from(document.querySelectorAll('button, [role=\"button\"], label, span'))
+                        .map(txt).filter(Boolean).slice(0, 80);
+                    return { url: location.href, title: document.title, buttons };
+                }\"\"\")
+                print(f"   [create_index] DIAG baseline hybrid missing: {summary}", flush=True)
+            except Exception as diag_e:
+                print(f"   [create_index] DIAG baseline evaluation failed: {diag_e}", flush=True)
+            print(f"   [create_index] DIAG screenshot saved: {snap_path}", flush=True)
+            raise
         await hybrid_btn.click()
         await asyncio.sleep(0.5)
         searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
@@ -60,7 +76,13 @@ STRATEGY_BLOCKS: dict[str, str] = {
             print("   [create_index] searchbox visible without Hybrid click.", flush=True)
         except Exception:
             hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
-            await hybrid_btn.wait_for(state="visible", timeout=12000)
+            try:
+                await hybrid_btn.wait_for(state="visible", timeout=12000)
+            except Exception:
+                snap_path = state_dir / f"{run_id}_searchbox_first_hybrid_missing.png"
+                await builder.screenshot(path=str(snap_path), full_page=True)
+                print(f"   [create_index] DIAG screenshot saved: {snap_path}", flush=True)
+                raise
             await hybrid_btn.click()
             await asyncio.sleep(0.5)
             await searchbox.wait_for(state="visible", timeout=15000)
@@ -75,7 +97,13 @@ STRATEGY_BLOCKS: dict[str, str] = {
             await asyncio.sleep(0.5)
         except Exception:
             hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
-            await hybrid_btn.wait_for(state="visible", timeout=12000)
+            try:
+                await hybrid_btn.wait_for(state="visible", timeout=12000)
+            except Exception:
+                snap_path = state_dir / f"{run_id}_hybrid_role_first_hybrid_missing.png"
+                await builder.screenshot(path=str(snap_path), full_page=True)
+                print(f"   [create_index] DIAG screenshot saved: {snap_path}", flush=True)
+                raise
             await hybrid_btn.click()
             await asyncio.sleep(0.5)
         await searchbox.wait_for(state="visible", timeout=15000)
@@ -83,7 +111,13 @@ STRATEGY_BLOCKS: dict[str, str] = {
 """,
     "searchbox_only": """        print("   [create_index] Builder opened. Hybrid + RagFileUDMO... [searchbox_only]", flush=True)
         searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
-        await searchbox.wait_for(state="visible", timeout=20000)
+        try:
+            await searchbox.wait_for(state="visible", timeout=20000)
+        except Exception:
+            snap_path = state_dir / f"{run_id}_searchbox_only_missing.png"
+            await builder.screenshot(path=str(snap_path), full_page=True)
+            print(f"   [create_index] DIAG screenshot saved: {snap_path}", flush=True)
+            raise
         await searchbox.fill("rag")
 """,
 }
