@@ -106,7 +106,7 @@ async def _try_submit_mfa_code(page, code: str) -> bool:
         return False
 
 
-async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout_seconds: int = 1800) -> bool:
+async def _wait_for_mfa_code_and_resume(page, run_id: str, should_abort, timeout_seconds: int = 43200) -> bool:
     if run_id:
         update_job_progress(
             run_id,
@@ -2144,7 +2144,11 @@ async def _create_search_index_ui(
         if _is_mfa_or_verification_url(current_url):
             page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 600) : 'no-body'")
             print(f"   [create_index] MFA/verification page detected.\n   URL: {current_url}\n   Page text: {page_text}", flush=True)
-            resumed = await _wait_for_mfa_code_and_resume(page, run_id, should_abort, timeout_seconds=1800)
+            try:
+                timeout_seconds = int(os.getenv("SF_AUTH_WAIT_SECONDS", "43200"))
+            except Exception:
+                timeout_seconds = 43200
+            resumed = await _wait_for_mfa_code_and_resume(page, run_id, should_abort, timeout_seconds=timeout_seconds)
             if not resumed:
                 await browser.close()
                 return (None, None)

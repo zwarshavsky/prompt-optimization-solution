@@ -2605,7 +2605,7 @@ elif page == "Jobs":
             run_id = run['run_id']
             status = run.get('status', 'unknown')
             progress = run.get('progress', {})
-            awaiting_mfa = progress.get('status') == 'awaiting_mfa'
+            waiting_auth = progress.get('status') in ('awaiting_mfa', 'awaiting_auth')
             
             # Get config info
             config = run.get('config', {})
@@ -2631,9 +2631,9 @@ elif page == "Jobs":
                 completed_at_str = 'In Progress' if status == 'running' else 'N/A'
             
             # Status icon and label (no duplicates)
-            if status == 'running' and awaiting_mfa:
+            if status == 'running' and waiting_auth:
                 status_icon = "🔐"
-                status_label = "Awaiting MFA"
+                status_label = "Awaiting Auth"
             elif status == 'running':
                 status_icon = "🔄"
                 status_label = "Running"
@@ -2688,8 +2688,11 @@ elif page == "Jobs":
                 3: 'Analyzing Results with Gemini'
             }
             
-            if status == 'running' and awaiting_mfa:
-                current_step_display = "Waiting for MFA code input"
+            if status == 'running' and waiting_auth:
+                if progress.get('status') == 'awaiting_auth':
+                    current_step_display = "Waiting for Auth Org login"
+                else:
+                    current_step_display = "Waiting for MFA code input"
             elif status == 'running' and current_step > 0:
                 current_step_display = f"Cycle {current_cycle} - Step {current_step}/3: {step_names.get(current_step, f'Step {current_step}')}"
             elif status == 'running' and current_cycle > 0:
@@ -2791,6 +2794,16 @@ elif page == "Jobs":
                         if st.button("🔐 Enter MFA", key=f"mfa_{run_id}", use_container_width=True):
                             open_mfa_modal(run_id)
                             st.rerun()
+                    if run_progress.get('status') == 'awaiting_auth':
+                        auth_url = (
+                            (run.get('checkpoint_info', {}) or {}).get('auth_org_url')
+                            or f"{run.get('config', {}).get('configuration', {}).get('salesforce', {}).get('instanceUrl', '').rstrip('/')}/lightning/page/home"
+                        )
+                        if auth_url and auth_url.startswith("http"):
+                            if hasattr(st, "link_button"):
+                                st.link_button("🔐 Auth Org", auth_url, use_container_width=True)
+                            else:
+                                st.markdown(f"[🔐 Auth Org]({auth_url})")
                 else:
                     st.markdown("—")
             
@@ -2891,6 +2904,10 @@ elif page == "Jobs":
                     status_icon = "🔐"
                     status_text = "Awaiting MFA verification code"
                     status_message = progress.get('message') or "Submit code from Jobs table to resume."
+                elif progress.get('status') == 'awaiting_auth':
+                    status_icon = "🔐"
+                    status_text = "Awaiting Auth Org login"
+                    status_message = progress.get('message') or "Use the Auth Org action in Jobs table to authenticate and resume."
                 elif job_status == 'running' and progress.get('status') == 'starting':
                     status_text = "Initializing workflow..."
                 elif progress.get('status') == 'cycle_start':
