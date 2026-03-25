@@ -112,27 +112,84 @@ CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS
                     });
                     return out;
                 };
+                const allRoots = () => {
+                    const roots = [document];
+                    const seen = new Set([document]);
+                    const stack = [document];
+                    while (stack.length) {
+                        const root = stack.pop();
+                        if (!root || !root.querySelectorAll) continue;
+                        root.querySelectorAll('*').forEach((el) => {
+                            if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+                                seen.add(el.shadowRoot);
+                                roots.push(el.shadowRoot);
+                                stack.push(el.shadowRoot);
+                            }
+                            if (el.tagName === 'IFRAME') {
+                                try {
+                                    const d = el.contentDocument;
+                                    if (d && !seen.has(d)) {
+                                        seen.add(d);
+                                        roots.push(d);
+                                        stack.push(d);
+                                    }
+                                } catch (_) {}
+                            }
+                        });
+                    }
+                    return roots;
+                };
+                const findHosts = () => {
+                    const out = [];
+                    for (const r of allRoots()) {
+                        if (!r.querySelectorAll) continue;
+                        r.querySelectorAll('runtime_cdp-search-index-chunking-strategy').forEach((h) => out.push(h));
+                    }
+                    return out;
+                };
+                const clickEditAffordances = () => {
+                    const selectors = [
+                        'button.slds-cell-edit__button',
+                        'button[title=\"pdf\"]',
+                        'lightning-button-icon',
+                        '[data-id]'
+                    ];
+                    let clicks = 0;
+                    for (const r of allRoots()) {
+                        if (!r.querySelectorAll) continue;
+                        for (const sel of selectors) {
+                            r.querySelectorAll(sel).forEach((el) => {
+                                const txt = ((el.innerText || el.textContent || el.getAttribute('title') || '') + '').toLowerCase();
+                                if (txt.includes('pdf') || sel !== 'button[title=\"pdf\"]') {
+                                    try {
+                                        el.click();
+                                        clicks++;
+                                    } catch (_) {}
+                                }
+                            });
+                        }
+                    }
+                    return clicks;
+                };
                 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
                 // January-era insight: don't proceed until chunking config appears mounted.
                 // This avoids acting while the builder is still hydrating in Heroku headless.
                 for (let warm = 1; warm <= 12; warm++) {
                     const bodyText = (document.body && document.body.textContent) ? document.body.textContent : '';
                     const hasIndicators = ['Passage Extraction', 'max_tokens', 'Chunking', 'perFileExtension'].some(k => bodyText.includes(k));
-                    const hostCountNow = document.querySelectorAll('runtime_cdp-search-index-chunking-strategy').length;
+                    const hostCountNow = findHosts().length;
                     if (hostCountNow > 0 || hasIndicators) break;
                     await sleep(1000);
                 }
                 const timeline = [];
                 for (let attempt = 1; attempt <= 6; attempt++) {
-                    const rows = Array.from(document.querySelectorAll('tr'));
-                    const row = rows.find(r => ((r.innerText || '').toLowerCase().includes('pdf')));
-                    const host = row ? row.querySelector('runtime_cdp-search-index-chunking-strategy') : null;
-                    const overlay = document.querySelector('lightning-overlay-container, section[role="dialog"], [role="dialog"]');
+                    const hosts = findHosts();
+                    const host = hosts[0] || null;
+                    const overlay = document.querySelector('lightning-overlay-container, section[role="dialog"], [role="dialog"], .slds-modal, .uiModal');
                     const hostShadowChildCount = host && host.shadowRoot ? host.shadowRoot.childElementCount : -1;
-                    const roots = [];
-                    if (host) roots.push(host.shadowRoot || host);
-                    if (overlay) roots.push(overlay.shadowRoot || overlay);
-                    roots.push(document);
+                    const roots = allRoots();
+                    if (host) roots.unshift(host.shadowRoot || host);
+                    if (overlay) roots.unshift(overlay.shadowRoot || overlay);
                     let inputs = [];
                     for (const rt of roots) {
                         inputs = walkInputs(rt, new Set(), []);
@@ -140,13 +197,13 @@ CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS
                     }
                     timeline.push({
                         attempt,
-                        row: !!row,
+                        row: false,
                         host: !!host,
                         hostConnected: !!(host && host.isConnected),
                         hostShadowChildCount,
                         overlay: !!overlay,
                         overlayTag: overlay ? overlay.tagName : null,
-                        inputs: inputs.length,
+                        inputs: inputs.length
                     });
                     if (inputs.length >= 2) {
                         const fire = (el, value) => {
@@ -160,15 +217,19 @@ CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS
                         };
                         fire(inputs[0], '8000');
                         fire(inputs[1], '512');
+                        // Verify values persisted before declaring success.
+                        const v0 = (inputs[0].value || '').toString();
+                        const v1 = (inputs[1].value || '').toString();
+                        if (!(v0.includes('8000') && v1.includes('512'))) {
+                            await sleep(500);
+                        }
                         return { ok: true, attempt, count: inputs.length, host: !!host, overlay: !!overlay, timeline };
                     }
                     await sleep(700);
-                    if (row) {
-                        const btn = row.querySelector('lightning-button-icon, button.slds-cell-edit__button, button[title="pdf"]');
-                        if (btn) btn.click();
-                    }
+                    const clicks = clickEditAffordances();
+                    timeline[timeline.length - 1].clicks = clicks;
                 }
-                const finalHostCount = document.querySelectorAll('runtime_cdp-search-index-chunking-strategy').length;
+                const finalHostCount = findHosts().length;
                 return { ok: false, reason: 'inputs-not-mounted', hostCount: finalHostCount, timeline };
             }\"\"\")
             print(f"   [create_index] JS chunk set result: {js_chunk}", flush=True)
