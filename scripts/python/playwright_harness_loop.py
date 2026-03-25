@@ -98,6 +98,10 @@ SETUP_URL_CANDIDATES_BLOCK = """        setup_candidates = [
                         setup_url = page.url
                         print(f"   [create_index] object-home candidate selected (New visible): {setup_url}", flush=True)
                         break
+                    if "search indexes" in t:
+                        setup_url = page.url
+                        print(f"   [create_index] object-home candidate selected (Search Indexes page): {setup_url}", flush=True)
+                        break
                     print(f"   [create_index] object-home candidate reached but New not visible: {page.url}", flush=True)
                 has_quick_find = await page.get_by_placeholder("Quick Find").count()
                 if has_quick_find == 0:
