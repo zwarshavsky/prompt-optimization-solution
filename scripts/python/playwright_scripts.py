@@ -2183,7 +2183,6 @@ async def _create_search_index_ui(
         try:
             await new_btn.wait_for(state="visible", timeout=12000)
         except Exception:
-            recovered_new = False
             if diag_mode:
                 try:
                     print(f"   [diag] URL before New fallback: {page.url}", flush=True)
@@ -2199,34 +2198,17 @@ async def _create_search_index_ui(
                     print(f"   [diag] Visible link texts: {links}", flush=True)
                 except Exception as e:
                     print(f"   [diag] Failed to capture New-fallback diagnostics: {e}", flush=True)
-            # Evidence-driven fallback: Setup nav is collapsed (many "Expand" controls, no New).
-            # Expand Data section and try opening Search Indexes from setup navigation.
+            print("   [create_index] 'New' not visible on current page; trying SearchIndex list fallback URL...", flush=True)
+            # Fallback: go straight to the SearchIndex object list view where "New" is rendered.
+            await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(1.5)
             try:
-                data_link = page.get_by_role("link", name="Data")
-                if await data_link.is_visible(timeout=3000):
-                    await data_link.click(timeout=5000)
-                    await asyncio.sleep(1.0)
-                search_indexes_link = page.get_by_role("link", name="Search Indexes")
-                if await search_indexes_link.is_visible(timeout=4000):
-                    await search_indexes_link.click(timeout=8000)
-                    await page.wait_for_load_state("domcontentloaded", timeout=20000)
-                    await asyncio.sleep(1.0)
-                    await new_btn.wait_for(state="visible", timeout=8000)
-                    recovered_new = True
+                await new_btn.wait_for(state="visible", timeout=12000)
             except Exception:
-                pass
-            if not recovered_new:
-                print("   [create_index] 'New' not visible on current page; trying SearchIndex list fallback URL...", flush=True)
-                # Fallback: go straight to the SearchIndex object list view where "New" is rendered.
-                await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="domcontentloaded", timeout=60000)
-                await asyncio.sleep(1.5)
-                try:
-                    await new_btn.wait_for(state="visible", timeout=12000)
-                except Exception:
-                    print("   [create_index] 'New' still not visible; opening SearchIndex new-record URL directly...", flush=True)
-                    await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
-                    await asyncio.sleep(1.0)
-                    opened_new_flow_direct = True
+                print("   [create_index] 'New' still not visible; opening SearchIndex new-record URL directly...", flush=True)
+                await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
+                await asyncio.sleep(1.0)
+                opened_new_flow_direct = True
         print("   [create_index] New→Advanced Setup→Next (builder)...", flush=True)
         if not opened_new_flow_direct:
             await new_btn.click()
