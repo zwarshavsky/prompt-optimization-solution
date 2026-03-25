@@ -62,6 +62,34 @@ def _load_yaml(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _load_config_from_db() -> dict:
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("No database connection available for harness config fallback.")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT config
+                FROM runs
+                WHERE config IS NOT NULL
+                  AND config::text <> 'null'
+                  AND config ? 'configuration'
+                ORDER BY updated_at DESC
+                LIMIT 20
+                """
+            )
+            rows = cur.fetchall()
+        for row in rows:
+            cfg = row[0] if row and row[0] else {}
+            sf = (cfg.get("configuration", {}) or {}).get("salesforce", {}) if isinstance(cfg, dict) else {}
+            if sf.get("username") and sf.get("password") and sf.get("instanceUrl"):
+                return cfg
+    finally:
+        conn.close()
+    raise RuntimeError("No valid config with Salesforce credentials found in runs table.")
+
+
 def _extract_sf(cfg: dict) -> tuple[str, str, str]:
     sf = cfg.get("configuration", {}).get("salesforce", {})
     username = sf.get("username")
@@ -114,14 +142,20 @@ async def _run_once(
     run_id: str,
     headless: bool,
 ) -> dict:
-    yaml_path = _resolve_yaml_path(yaml_path)
-    cfg = _load_yaml(yaml_path)
+    cfg_source = ""
+    try:
+        yaml_path = _resolve_yaml_path(yaml_path)
+        cfg = _load_yaml(yaml_path)
+        cfg_source = str(yaml_path)
+    except Exception:
+        cfg = _load_config_from_db()
+        cfg_source = "database:runs.config"
     username, password, instance_url = _extract_sf(cfg)
     _, access_token = get_salesforce_credentials(
         username=username, password=password, instance_url=instance_url
     )
     index_name = get_next_index_name(instance_url, access_token, base_name=index_prefix)
-    _upsert_harness_run(run_id, "running", f"Harness attempt starting for {index_name} using {yaml_path}")
+    _upsert_harness_run(run_id, "running", f"Harness attempt starting for {index_name} using {cfg_source}")
 
     def should_abort() -> bool:
         return False
