@@ -94,7 +94,10 @@ CHUNK_FILL_BLOCK_REPLACEMENT = """        if not used_js_chunking:
 """
 BASELINE_CHUNK_ERROR_LINE = """            raise RuntimeError(f"Chunking inputs not found after 5 expand strategies. pdf_row text='{pdf_row_text}'")"""
 CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS direct set inside runtime_cdp-search-index-chunking-strategy", flush=True)
-            js_chunk = await pdf_row.evaluate(\"\"\"(row) => {
+            js_chunk = await builder.evaluate(\"\"\"() => {
+                const rows = Array.from(document.querySelectorAll('tr'));
+                const row = rows.find(r => ((r.innerText || '').toLowerCase().includes('pdf')));
+                if (!row) return { ok: false, reason: 'pdf-row-missing' };
                 const host = row.querySelector('runtime_cdp-search-index-chunking-strategy');
                 if (!host) return { ok: false, reason: 'host-missing-in-row' };
                 const seen = new Set();
