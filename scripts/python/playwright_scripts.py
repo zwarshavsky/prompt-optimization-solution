@@ -2183,57 +2183,85 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
         pdf_row_html = await pdf_row.evaluate("el => el.innerHTML.substring(0, 1500)")
         print(f"   [create_index] pdf_row HTML: {pdf_row_html}", flush=True)
 
-        # Try multiple interaction strategies to expand the pdf row
         chunk_inputs = builder.locator("input[type='number'], input[inputmode='numeric'], [role='spinbutton']")
 
-        # Strategy 1: Click expand/toggle button inside the row
-        expand_btn = pdf_row.locator("button, [role='button'], lightning-primitive-icon, lightning-button-icon, .slds-button").first
-        if await expand_btn.count() > 0:
-            print(f"   [create_index] Strategy 1: clicking expand button in pdf row", flush=True)
-            await expand_btn.click()
-            await asyncio.sleep(2)
+        # Check if chunking inputs are already visible (component may have auto-loaded)
+        print(f"   [create_index] Checking for pre-loaded chunking inputs...", flush=True)
+        await asyncio.sleep(3)
+        initial_count = await chunk_inputs.count()
+        print(f"   [create_index] Initial chunk input count: {initial_count}", flush=True)
+
+        if initial_count < 2:
+            # Strategy 1: Click the lightning-button-icon in the 3rd td (settings/expand)
+            settings_btn = pdf_row.locator("lightning-button-icon").first
+            if await settings_btn.count() > 0:
+                print(f"   [create_index] Strategy 1: clicking lightning-button-icon (settings)", flush=True)
+                try:
+                    await settings_btn.click(timeout=5000)
+                    await asyncio.sleep(3)
+                except Exception as e:
+                    print(f"   [create_index] Strategy 1 click failed: {e}", flush=True)
 
         if await chunk_inputs.count() < 2:
-            # Strategy 2: Click the first cell (td) of the row
-            first_td = pdf_row.locator("td").first
-            if await first_td.count() > 0:
-                print(f"   [create_index] Strategy 2: clicking first td in pdf row", flush=True)
-                await first_td.click()
-                await asyncio.sleep(2)
+            # Strategy 2: Click the chunking-strategy component itself
+            chunking_comp = pdf_row.locator("runtime_cdp-search-index-chunking-strategy").first
+            if await chunking_comp.count() > 0:
+                print(f"   [create_index] Strategy 2: clicking chunking-strategy component", flush=True)
+                try:
+                    await chunking_comp.click(timeout=5000)
+                    await asyncio.sleep(3)
+                except Exception as e:
+                    print(f"   [create_index] Strategy 2 click failed: {e}", flush=True)
 
         if await chunk_inputs.count() < 2:
-            # Strategy 3: Click the row itself
-            print(f"   [create_index] Strategy 3: clicking pdf row directly", flush=True)
-            await pdf_row.scroll_into_view_if_needed()
-            await pdf_row.click()
-            await asyncio.sleep(2)
+            # Strategy 3: Click the cell-edit button (pencil icon)
+            edit_btn = pdf_row.locator("button.slds-cell-edit__button, button[title='pdf']").first
+            if await edit_btn.count() > 0:
+                print(f"   [create_index] Strategy 3: clicking cell-edit button", flush=True)
+                try:
+                    await edit_btn.click(timeout=5000)
+                    await asyncio.sleep(3)
+                except Exception as e:
+                    print(f"   [create_index] Strategy 3 click failed: {e}", flush=True)
 
         if await chunk_inputs.count() < 2:
-            # Strategy 4: Force click on the row
-            print(f"   [create_index] Strategy 4: force-clicking pdf row", flush=True)
-            await pdf_row.click(force=True)
-            await asyncio.sleep(3)
+            # Strategy 4: Use JS to search inside shadow DOMs for any numeric inputs
+            print(f"   [create_index] Strategy 4: JS shadow DOM search", flush=True)
+            shadow_inputs = await builder.evaluate("""() => {
+                function findInShadow(root, results) {
+                    if (!root) return;
+                    const inputs = root.querySelectorAll('input[type="number"], input[inputmode="numeric"], [role="spinbutton"]');
+                    inputs.forEach(i => results.push({tag: i.tagName, type: i.type, name: i.name, id: i.id}));
+                    root.querySelectorAll('*').forEach(el => {
+                        if (el.shadowRoot) findInShadow(el.shadowRoot, results);
+                    });
+                }
+                const results = [];
+                findInShadow(document, results);
+                return results;
+            }""")
+            print(f"   [create_index] Shadow DOM inputs found: {shadow_inputs}", flush=True)
 
         if await chunk_inputs.count() < 2:
-            # Strategy 5: Click any element with "pdf" text (maybe it's a link/anchor)
-            pdf_text_el = pdf_row.locator("a, span, td").filter(has_text="pdf").first
-            if await pdf_text_el.count() > 0:
-                print(f"   [create_index] Strategy 5: clicking pdf text element", flush=True)
-                await pdf_text_el.click()
-                await asyncio.sleep(2)
+            # Strategy 5: Click the pdf_row's second td (where chunking component is)
+            second_td = pdf_row.locator("td").nth(1)
+            if await second_td.count() > 0:
+                print(f"   [create_index] Strategy 5: clicking second td (chunking area)", flush=True)
+                try:
+                    await second_td.click(timeout=5000)
+                    await asyncio.sleep(3)
+                except Exception as e:
+                    print(f"   [create_index] Strategy 5 click failed: {e}", flush=True)
 
         final_count = await chunk_inputs.count()
         print(f"   [create_index] After all strategies: {final_count} chunk input(s) found", flush=True)
         if final_count < 2:
-            # Dump full page state for debugging
             all_inputs = await builder.locator("input").count()
             all_btns = await builder.locator("button").count()
-            print(f"   [create_index] Page has {all_inputs} input(s), {all_btns} button(s)", flush=True)
-            # Check if inputs appeared but with different selectors
             spin_count = await builder.locator("[role='spinbutton']").count()
             number_count = await builder.locator("input[type='number']").count()
             numeric_count = await builder.locator("input[inputmode='numeric']").count()
-            print(f"   [create_index] spinbutton={spin_count} number={number_count} numeric={numeric_count}", flush=True)
+            print(f"   [create_index] Page: {all_inputs} inputs, {all_btns} buttons, spin={spin_count} number={number_count} numeric={numeric_count}", flush=True)
             raise RuntimeError(f"Chunking inputs not found after 5 expand strategies. pdf_row text='{pdf_row_text}'")
 
         await chunk_inputs.nth(0).wait_for(state="visible", timeout=10000)
