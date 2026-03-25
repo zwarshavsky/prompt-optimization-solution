@@ -18,6 +18,7 @@ import random
 import sys
 import time
 import tempfile
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -493,13 +494,15 @@ async def main_async(args: argparse.Namespace) -> int:
     summary_path = artifacts_dir / "playwright_harness_history.jsonl"
 
     count = 0
-    strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
-    if not strategies:
-        strategies = ["baseline"]
+    strategy_list = [s.strip() for s in args.strategies.split(",") if s.strip()]
+    if not strategy_list:
+        strategy_list = ["baseline"]
+    strategies = deque(strategy_list)
     while True:
         count += 1
         run_id = args.run_id or _new_run_id()
-        strategy = strategies[(count - 1) % len(strategies)]
+        strategy = strategies[0]
+        strategies.rotate(-1)
         print(f"[harness] attempt={count} run_id={run_id} strategy={strategy}", flush=True)
         result = await _run_once(
             yaml_path=Path(args.yaml).resolve(),
@@ -514,9 +517,29 @@ async def main_async(args: argparse.Namespace) -> int:
             f.write(json.dumps(result) + "\n")
         print(f"[harness] result={json.dumps(result)}", flush=True)
 
+        # Live-reactive strategy steering based on concrete failure signatures.
+        if not result.get("ok"):
+            err = (result.get("error") or "").lower()
+            preferred: list[str] = []
+            if "hybrid search" in err or "searchbox" in err:
+                preferred = ["searchbox_first", "baseline", "hybrid_role_first"]
+            elif "pdf-row-missing" in err or "host-missing" in err or "inputs-not-mounted" in err:
+                preferred = ["setup_only_recovery", "baseline", "searchbox_first"]
+            elif "chunking inputs not found" in err:
+                preferred = ["baseline", "setup_only_recovery", "searchbox_first"]
+            if preferred:
+                current = list(strategies)
+                rest = [s for s in current if s not in preferred]
+                strategies = deque([s for s in preferred if s in current] + rest)
+                print(f"[harness] adaptive_reorder err_hint='{preferred[0]}' next={list(strategies)}", flush=True)
+
         if args.max_attempts > 0 and count >= args.max_attempts:
             break
-        time.sleep(args.sleep_seconds)
+        # Faster retries when failures are deterministic.
+        sleep_seconds = args.sleep_seconds
+        if not result.get("ok"):
+            sleep_seconds = min(args.sleep_seconds, 30)
+        time.sleep(sleep_seconds)
     return 0
 
 
