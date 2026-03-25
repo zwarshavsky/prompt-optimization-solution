@@ -74,6 +74,73 @@ BASELINE_OBJECT_NEW_FALLBACK = """            except Exception:
 """
 
 BASELINE_SETUP_URL_LINE = '        setup_url = f"{base}/lightning/setup/DataSemanticSearch/home"'
+BASELINE_CHUNK_INPUTS_LINE = "        chunk_inputs = builder.locator(\"input[type='number'], input[inputmode='numeric'], [role='spinbutton']\")"
+BASELINE_CHUNK_FILL_BLOCK = """        await chunk_inputs.nth(0).wait_for(state="visible", timeout=10000)
+        # Max Tokens
+        max_tokens_input = chunk_inputs.nth(0)
+        await max_tokens_input.click()
+        await max_tokens_input.fill("")
+        await max_tokens_input.type("8000")
+        await max_tokens_input.press("Tab")
+        await asyncio.sleep(0.3)
+        # Overlap Tokens — use click+clear+type+Tab to trigger change detection
+        overlap_input = chunk_inputs.nth(1)
+        await overlap_input.click()
+        await overlap_input.fill("")
+        await overlap_input.type("512")
+        await overlap_input.press("Tab")
+        await asyncio.sleep(0.3)
+"""
+CHUNK_FILL_BLOCK_REPLACEMENT = """        if not used_js_chunking:
+            await chunk_inputs.nth(0).wait_for(state="visible", timeout=10000)
+            # Max Tokens
+            max_tokens_input = chunk_inputs.nth(0)
+            await max_tokens_input.click()
+            await max_tokens_input.fill("")
+            await max_tokens_input.type("8000")
+            await max_tokens_input.press("Tab")
+            await asyncio.sleep(0.3)
+            # Overlap Tokens — use click+clear+type+Tab to trigger change detection
+            overlap_input = chunk_inputs.nth(1)
+            await overlap_input.click()
+            await overlap_input.fill("")
+            await overlap_input.type("512")
+            await overlap_input.press("Tab")
+            await asyncio.sleep(0.3)
+"""
+BASELINE_CHUNK_ERROR_LINE = """            raise RuntimeError(f"Chunking inputs not found after 5 expand strategies. pdf_row text='{pdf_row_text}'")"""
+CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS direct set inside runtime_cdp-search-index-chunking-strategy", flush=True)
+            js_chunk = await builder.evaluate(\"\"\"() => {
+                const host = document.querySelector('runtime_cdp-search-index-chunking-strategy');
+                if (!host) return { ok: false, reason: 'host-missing' };
+                const seen = new Set();
+                const out = [];
+                const walk = (root) => {
+                    if (!root || seen.has(root)) return;
+                    seen.add(root);
+                    const local = root.querySelectorAll('input[type="number"], input[inputmode="numeric"], [role="spinbutton"]');
+                    local.forEach(el => out.push(el));
+                    root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) walk(el.shadowRoot); });
+                };
+                walk(host.shadowRoot || host);
+                if (out.length < 2) return { ok: false, reason: `inputs-${out.length}` };
+                const fire = (el, value) => {
+                    el.focus();
+                    el.value = value;
+                    el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, composed: true }));
+                    el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Tab', bubbles: true, composed: true }));
+                    el.blur();
+                };
+                fire(out[0], '8000');
+                fire(out[1], '512');
+                return { ok: true, count: out.length };
+            }\"\"\")
+            print(f"   [create_index] JS chunk set result: {js_chunk}", flush=True)
+            if not js_chunk.get("ok"):
+                raise RuntimeError(f"Chunking inputs not found after 6 strategies. pdf_row text='{pdf_row_text}' js={js_chunk}")
+            used_js_chunking = True"""
 
 SETUP_URL_CANDIDATES_BLOCK = """        setup_candidates = [
             f"{base}/lightning/o/DataSemanticSearch/home",
@@ -211,6 +278,22 @@ def _load_create_index_func(strategy: str) -> Callable:
             # Keep strategy execution alive even if upstream source formatting changed.
             # This prevents matrix runs from aborting on brittle text replacement.
             print(f"[harness] WARN: hybrid patch block not found for strategy={strategy}; continuing without hybrid override.", flush=True)
+    if BASELINE_CHUNK_INPUTS_LINE in source:
+        source = source.replace(
+            BASELINE_CHUNK_INPUTS_LINE,
+            BASELINE_CHUNK_INPUTS_LINE + "\n        used_js_chunking = False",
+            1,
+        )
+    else:
+        print("[harness] WARN: chunk_inputs line not found; chunk-js patch skipped.", flush=True)
+    if BASELINE_CHUNK_ERROR_LINE in source:
+        source = source.replace(BASELINE_CHUNK_ERROR_LINE, CHUNK_ERROR_REPLACEMENT, 1)
+    else:
+        print("[harness] WARN: chunk error line not found; chunk-js strategy skipped.", flush=True)
+    if BASELINE_CHUNK_FILL_BLOCK in source:
+        source = source.replace(BASELINE_CHUNK_FILL_BLOCK, CHUNK_FILL_BLOCK_REPLACEMENT, 1)
+    else:
+        print("[harness] WARN: chunk fill block not found; chunk-js fill guard skipped.", flush=True)
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as tf:
         tf.write(source)
         temp_path = tf.name
