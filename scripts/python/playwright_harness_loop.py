@@ -94,6 +94,72 @@ CHUNK_FILL_BLOCK_REPLACEMENT = """        if not used_js_chunking:
             await asyncio.sleep(0.3)
 """
 BASELINE_CHUNK_ERROR_LINE = """            raise RuntimeError(f"Chunking inputs not found after 5 expand strategies. pdf_row text='{pdf_row_text}'")"""
+BASELINE_TABLE_SAVE_BLOCK = """        save_btn = builder.get_by_role("table").get_by_role("button", name="Save")
+        if await save_btn.is_visible():
+            await save_btn.click()
+            await asyncio.sleep(1)"""
+TABLE_SAVE_REPLACEMENT = """        print("   [create_index] Save-gate: waiting for row Save to enable...", flush=True)
+        save_clicked = False
+        last_diag = {}
+        for save_attempt in range(1, 46):
+            # Re-query every attempt to avoid stale handles during LWC re-renders.
+            save_candidates = [
+                builder.get_by_role("table").get_by_role("button", name="Save"),
+                builder.get_by_role("button", name="Save"),
+                builder.locator("button:has-text('Save')"),
+            ]
+            for cand in save_candidates:
+                try:
+                    if await cand.count() == 0:
+                        continue
+                    btn = cand.first
+                    if not await btn.is_visible():
+                        continue
+                    disabled = await btn.get_attribute("disabled")
+                    aria_disabled = await btn.get_attribute("aria-disabled")
+                    cls = (await btn.get_attribute("class")) or ""
+                    is_disabled = (disabled is not None) or (aria_disabled == "true") or ("disabled" in cls.lower())
+                    if not is_disabled:
+                        await btn.click(timeout=8000)
+                        await asyncio.sleep(1.0)
+                        print(f"   [create_index] Save-gate: clicked Save on attempt {save_attempt}", flush=True)
+                        save_clicked = True
+                        break
+                except Exception:
+                    pass
+            if save_clicked:
+                break
+
+            # Nudge validation and capture diagnostics while waiting.
+            last_diag = await builder.evaluate(\"\"\"() => {
+                const isNum = (el) => {
+                    const t = (el.getAttribute('type') || '').toLowerCase();
+                    const im = (el.getAttribute('inputmode') || '').toLowerCase();
+                    const role = (el.getAttribute('role') || '').toLowerCase();
+                    return t === 'number' || im === 'numeric' || role === 'spinbutton';
+                };
+                const nums = Array.from(document.querySelectorAll('input, [role=\"spinbutton\"]')).filter(isNum);
+                nums.forEach((el) => {
+                    try {
+                        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                        el.dispatchEvent(new FocusEvent('blur', { bubbles: true, composed: true }));
+                    } catch (_) {}
+                });
+                const saves = Array.from(document.querySelectorAll('button'))
+                    .filter((b) => ((b.innerText || b.textContent || '').trim() === 'Save'))
+                    .map((b) => ({
+                        disabled: !!b.disabled,
+                        ariaDisabled: b.getAttribute('aria-disabled'),
+                        cls: b.className || ''
+                    }));
+                return { numericInputs: nums.length, saves };
+            }\"\"\")
+            if save_attempt % 5 == 0:
+                print(f"   [create_index] Save-gate wait attempt={save_attempt} diag={last_diag}", flush=True)
+            await asyncio.sleep(1.0)
+        if not save_clicked:
+            raise RuntimeError(f"Save button did not enable/click after gate. diag={last_diag}")"""
 CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS direct set with row+overlay retries", flush=True)
             js_chunk = await builder.evaluate(\"\"\"async () => {
                 const isNum = (el) => {
@@ -389,6 +455,10 @@ def _load_create_index_func(strategy: str) -> Callable:
         source = source.replace(BASELINE_CHUNK_FILL_BLOCK, CHUNK_FILL_BLOCK_REPLACEMENT, 1)
     else:
         print("[harness] WARN: chunk fill block not found; chunk-js fill guard skipped.", flush=True)
+    if BASELINE_TABLE_SAVE_BLOCK in source:
+        source = source.replace(BASELINE_TABLE_SAVE_BLOCK, TABLE_SAVE_REPLACEMENT, 1)
+    else:
+        print("[harness] WARN: table save block not found; save-gate patch skipped.", flush=True)
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as tf:
         tf.write(source)
         temp_path = tf.name
