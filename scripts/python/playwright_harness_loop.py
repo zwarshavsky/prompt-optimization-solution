@@ -122,11 +122,13 @@ CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS
                     if (hostCountNow > 0 || hasIndicators) break;
                     await sleep(1000);
                 }
-                for (let attempt = 1; attempt <= 4; attempt++) {
+                const timeline = [];
+                for (let attempt = 1; attempt <= 6; attempt++) {
                     const rows = Array.from(document.querySelectorAll('tr'));
                     const row = rows.find(r => ((r.innerText || '').toLowerCase().includes('pdf')));
                     const host = row ? row.querySelector('runtime_cdp-search-index-chunking-strategy') : null;
                     const overlay = document.querySelector('lightning-overlay-container, section[role="dialog"], [role="dialog"]');
+                    const hostShadowChildCount = host && host.shadowRoot ? host.shadowRoot.childElementCount : -1;
                     const roots = [];
                     if (host) roots.push(host.shadowRoot || host);
                     if (overlay) roots.push(overlay.shadowRoot || overlay);
@@ -136,6 +138,16 @@ CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS
                         inputs = walkInputs(rt, new Set(), []);
                         if (inputs.length >= 2) break;
                     }
+                    timeline.push({
+                        attempt,
+                        row: !!row,
+                        host: !!host,
+                        hostConnected: !!(host && host.isConnected),
+                        hostShadowChildCount,
+                        overlay: !!overlay,
+                        overlayTag: overlay ? overlay.tagName : null,
+                        inputs: inputs.length,
+                    });
                     if (inputs.length >= 2) {
                         const fire = (el, value) => {
                             el.focus();
@@ -148,7 +160,7 @@ CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS
                         };
                         fire(inputs[0], '8000');
                         fire(inputs[1], '512');
-                        return { ok: true, attempt, count: inputs.length, host: !!host, overlay: !!overlay };
+                        return { ok: true, attempt, count: inputs.length, host: !!host, overlay: !!overlay, timeline };
                     }
                     await sleep(700);
                     if (row) {
@@ -157,7 +169,7 @@ CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS
                     }
                 }
                 const finalHostCount = document.querySelectorAll('runtime_cdp-search-index-chunking-strategy').length;
-                return { ok: false, reason: 'inputs-not-mounted', hostCount: finalHostCount };
+                return { ok: false, reason: 'inputs-not-mounted', hostCount: finalHostCount, timeline };
             }\"\"\")
             print(f"   [create_index] JS chunk set result: {js_chunk}", flush=True)
             if not js_chunk.get("ok"):
