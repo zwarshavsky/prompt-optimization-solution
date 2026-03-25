@@ -2179,9 +2179,25 @@ async def _create_search_index_ui(
         print("   [create_index] Waiting for New button...", flush=True)
         new_btn = page.get_by_role("button", name="New")
         opened_new_flow_direct = False
+        diag_mode = os.getenv("SF_C2_DIAG", "").strip().lower() in {"1", "true", "yes"}
         try:
             await new_btn.wait_for(state="visible", timeout=12000)
         except Exception:
+            if diag_mode:
+                try:
+                    print(f"   [diag] URL before New fallback: {page.url}", flush=True)
+                    btns = await page.evaluate("""() => Array.from(document.querySelectorAll('button,input[type="button"],input[type="submit"]'))
+                        .map(el => (el.innerText || el.value || '').trim())
+                        .filter(Boolean)
+                        .slice(0, 40)""")
+                    links = await page.evaluate("""() => Array.from(document.querySelectorAll('a'))
+                        .map(a => (a.innerText || '').trim())
+                        .filter(Boolean)
+                        .slice(0, 40)""")
+                    print(f"   [diag] Visible button texts: {btns}", flush=True)
+                    print(f"   [diag] Visible link texts: {links}", flush=True)
+                except Exception as e:
+                    print(f"   [diag] Failed to capture New-fallback diagnostics: {e}", flush=True)
             print("   [create_index] 'New' not visible on current page; trying SearchIndex list fallback URL...", flush=True)
             # Fallback: go straight to the SearchIndex object list view where "New" is rendered.
             await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="domcontentloaded", timeout=60000)
