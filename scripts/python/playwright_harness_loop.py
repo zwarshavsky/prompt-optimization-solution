@@ -113,6 +113,15 @@ CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS
                     return out;
                 };
                 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+                // January-era insight: don't proceed until chunking config appears mounted.
+                // This avoids acting while the builder is still hydrating in Heroku headless.
+                for (let warm = 1; warm <= 12; warm++) {
+                    const bodyText = (document.body && document.body.textContent) ? document.body.textContent : '';
+                    const hasIndicators = ['Passage Extraction', 'max_tokens', 'Chunking', 'perFileExtension'].some(k => bodyText.includes(k));
+                    const hostCountNow = document.querySelectorAll('runtime_cdp-search-index-chunking-strategy').length;
+                    if (hostCountNow > 0 || hasIndicators) break;
+                    await sleep(1000);
+                }
                 for (let attempt = 1; attempt <= 4; attempt++) {
                     const rows = Array.from(document.querySelectorAll('tr'));
                     const row = rows.find(r => ((r.innerText || '').toLowerCase().includes('pdf')));
@@ -147,7 +156,8 @@ CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS
                         if (btn) btn.click();
                     }
                 }
-                return { ok: false, reason: 'inputs-not-mounted', hostCount: document.querySelectorAll('runtime_cdp-search-index-chunking-strategy').length };
+                const finalHostCount = document.querySelectorAll('runtime_cdp-search-index-chunking-strategy').length;
+                return { ok: false, reason: 'inputs-not-mounted', hostCount: finalHostCount };
             }\"\"\")
             print(f"   [create_index] JS chunk set result: {js_chunk}", flush=True)
             if not js_chunk.get("ok"):
