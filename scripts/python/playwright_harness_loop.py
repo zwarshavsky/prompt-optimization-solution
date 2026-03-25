@@ -13,12 +13,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import importlib.util
 import random
 import sys
 import time
+import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import yaml
 
@@ -26,7 +28,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from playwright_scripts import _create_search_index_ui  # noqa: E402
 from salesforce_api import get_next_index_name, get_salesforce_credentials  # noqa: E402
 from worker_utils import get_db_connection  # noqa: E402
 
@@ -37,6 +38,79 @@ def _now() -> str:
 
 def _new_run_id() -> str:
     return f"harness_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
+
+
+BASELINE_HYBRID_BLOCK = """        print("   [create_index] Builder opened. Hybrid + RagFileUDMO...", flush=True)
+        hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
+        await hybrid_btn.wait_for(state="visible", timeout=15000)
+        await hybrid_btn.click()
+        await asyncio.sleep(0.5)
+        searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
+        await searchbox.wait_for(state="visible", timeout=15000)
+        await searchbox.fill("rag")
+"""
+
+
+STRATEGY_BLOCKS: dict[str, str] = {
+    "baseline": BASELINE_HYBRID_BLOCK,
+    "searchbox_first": """        print("   [create_index] Builder opened. Hybrid + RagFileUDMO... [searchbox_first]", flush=True)
+        searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
+        try:
+            await searchbox.wait_for(state="visible", timeout=7000)
+            print("   [create_index] searchbox visible without Hybrid click.", flush=True)
+        except Exception:
+            hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
+            await hybrid_btn.wait_for(state="visible", timeout=12000)
+            await hybrid_btn.click()
+            await asyncio.sleep(0.5)
+            await searchbox.wait_for(state="visible", timeout=15000)
+        await searchbox.fill("rag")
+""",
+    "hybrid_role_first": """        print("   [create_index] Builder opened. Hybrid + RagFileUDMO... [hybrid_role_first]", flush=True)
+        searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
+        hybrid_role = builder.get_by_role("radio", name=re.compile("hybrid", re.IGNORECASE)).first
+        try:
+            await hybrid_role.wait_for(state="visible", timeout=8000)
+            await hybrid_role.click()
+            await asyncio.sleep(0.5)
+        except Exception:
+            hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
+            await hybrid_btn.wait_for(state="visible", timeout=12000)
+            await hybrid_btn.click()
+            await asyncio.sleep(0.5)
+        await searchbox.wait_for(state="visible", timeout=15000)
+        await searchbox.fill("rag")
+""",
+    "searchbox_only": """        print("   [create_index] Builder opened. Hybrid + RagFileUDMO... [searchbox_only]", flush=True)
+        searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
+        await searchbox.wait_for(state="visible", timeout=20000)
+        await searchbox.fill("rag")
+""",
+}
+
+
+def _load_create_index_func(strategy: str) -> Callable:
+    source_path = SCRIPT_DIR / "playwright_scripts.py"
+    source = source_path.read_text(encoding="utf-8")
+    if strategy not in STRATEGY_BLOCKS:
+        strategy = "baseline"
+    replacement = STRATEGY_BLOCKS[strategy]
+    if strategy != "baseline":
+        if BASELINE_HYBRID_BLOCK not in source:
+            raise RuntimeError("Could not find baseline hybrid block to patch for harness strategy.")
+        source = source.replace(BASELINE_HYBRID_BLOCK, replacement, 1)
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as tf:
+        tf.write(source)
+        temp_path = tf.name
+    spec = importlib.util.spec_from_file_location(f"playwright_scripts_{strategy}", temp_path)
+    if not spec or not spec.loader:
+        raise RuntimeError("Failed to load temporary Playwright module.")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    func = getattr(module, "_create_search_index_ui", None)
+    if not callable(func):
+        raise RuntimeError("Patched module missing _create_search_index_ui.")
+    return func
 
 
 def _resolve_yaml_path(path: Path) -> Path:
@@ -141,6 +215,7 @@ async def _run_once(
     state_dir: Path,
     run_id: str,
     headless: bool,
+    strategy: str,
 ) -> dict:
     cfg_source = ""
     try:
@@ -155,14 +230,15 @@ async def _run_once(
         username=username, password=password, instance_url=instance_url
     )
     index_name = get_next_index_name(instance_url, access_token, base_name=index_prefix)
-    _upsert_harness_run(run_id, "running", f"Harness attempt starting for {index_name} using {cfg_source}")
+    _upsert_harness_run(run_id, "running", f"Harness attempt starting for {index_name} using {cfg_source} strategy={strategy}")
 
     def should_abort() -> bool:
         return False
 
     started = time.time()
     try:
-        index_id, full_name = await _create_search_index_ui(
+        create_index_func = _load_create_index_func(strategy)
+        index_id, full_name = await create_index_func(
             username=username,
             password=password,
             instance_url=instance_url,
@@ -184,6 +260,7 @@ async def _run_once(
         return {
             "ok": ok,
             "run_id": run_id,
+            "strategy": strategy,
             "index_id": index_id,
             "index_name": full_name or index_name,
             "elapsed_seconds": elapsed,
@@ -195,6 +272,7 @@ async def _run_once(
         return {
             "ok": False,
             "run_id": run_id,
+            "strategy": strategy,
             "error": f"{type(e).__name__}: {e}",
             "elapsed_seconds": elapsed,
             "timestamp": _now(),
@@ -209,10 +287,14 @@ async def main_async(args: argparse.Namespace) -> int:
     summary_path = artifacts_dir / "playwright_harness_history.jsonl"
 
     count = 0
+    strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
+    if not strategies:
+        strategies = ["baseline"]
     while True:
         count += 1
         run_id = args.run_id or _new_run_id()
-        print(f"[harness] attempt={count} run_id={run_id}", flush=True)
+        strategy = strategies[(count - 1) % len(strategies)]
+        print(f"[harness] attempt={count} run_id={run_id} strategy={strategy}", flush=True)
         result = await _run_once(
             yaml_path=Path(args.yaml).resolve(),
             index_prefix=args.index_prefix,
@@ -220,6 +302,7 @@ async def main_async(args: argparse.Namespace) -> int:
             state_dir=state_dir,
             run_id=run_id,
             headless=args.headless,
+            strategy=strategy,
         )
         with summary_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(result) + "\n")
@@ -244,6 +327,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sleep-seconds", type=int, default=120, help="Wait between attempts")
     p.add_argument("--max-attempts", type=int, default=0, help="0 means infinite loop")
     p.add_argument("--run-id", default=None, help="Optional fixed run_id (usually omit)")
+    p.add_argument(
+        "--strategies",
+        default="baseline,searchbox_first,hybrid_role_first,searchbox_only",
+        help="Comma-separated strategy sequence for harness-only rapid variants",
+    )
     p.add_argument("--state-dir", default="scripts/python/state", help="State directory")
     p.add_argument(
         "--artifacts-dir",
