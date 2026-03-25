@@ -93,36 +93,60 @@ CHUNK_FILL_BLOCK_REPLACEMENT = """        if not used_js_chunking:
             await asyncio.sleep(0.3)
 """
 BASELINE_CHUNK_ERROR_LINE = """            raise RuntimeError(f"Chunking inputs not found after 5 expand strategies. pdf_row text='{pdf_row_text}'")"""
-CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS direct set inside runtime_cdp-search-index-chunking-strategy", flush=True)
-            js_chunk = await builder.evaluate(\"\"\"() => {
-                const rows = Array.from(document.querySelectorAll('tr'));
-                const row = rows.find(r => ((r.innerText || '').toLowerCase().includes('pdf')));
-                if (!row) return { ok: false, reason: 'pdf-row-missing' };
-                const host = row.querySelector('runtime_cdp-search-index-chunking-strategy');
-                if (!host) return { ok: false, reason: 'host-missing-in-row' };
-                const seen = new Set();
-                const out = [];
-                const walk = (root) => {
-                    if (!root || seen.has(root)) return;
+CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS direct set with row+overlay retries", flush=True)
+            js_chunk = await builder.evaluate(\"\"\"async () => {
+                const isNum = (el) => {
+                    if (!el) return false;
+                    const t = (el.getAttribute('type') || '').toLowerCase();
+                    const im = (el.getAttribute('inputmode') || '').toLowerCase();
+                    const role = (el.getAttribute('role') || '').toLowerCase();
+                    return t === 'number' || im === 'numeric' || role === 'spinbutton';
+                };
+                const walkInputs = (root, seen = new Set(), out = []) => {
+                    if (!root || seen.has(root)) return out;
                     seen.add(root);
-                    const local = root.querySelectorAll('input[type="number"], input[inputmode="numeric"], [role="spinbutton"]');
-                    local.forEach(el => out.push(el));
-                    root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) walk(el.shadowRoot); });
+                    root.querySelectorAll('*').forEach((el) => {
+                        if (isNum(el)) out.push(el);
+                        if (el.shadowRoot) walkInputs(el.shadowRoot, seen, out);
+                    });
+                    return out;
                 };
-                walk(host.shadowRoot || host);
-                if (out.length < 2) return { ok: false, reason: `inputs-${out.length}` };
-                const fire = (el, value) => {
-                    el.focus();
-                    el.value = value;
-                    el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-                    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, composed: true }));
-                    el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Tab', bubbles: true, composed: true }));
-                    el.blur();
-                };
-                fire(out[0], '8000');
-                fire(out[1], '512');
-                return { ok: true, count: out.length };
+                const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+                for (let attempt = 1; attempt <= 4; attempt++) {
+                    const rows = Array.from(document.querySelectorAll('tr'));
+                    const row = rows.find(r => ((r.innerText || '').toLowerCase().includes('pdf')));
+                    const host = row ? row.querySelector('runtime_cdp-search-index-chunking-strategy') : null;
+                    const overlay = document.querySelector('lightning-overlay-container, section[role="dialog"], [role="dialog"]');
+                    const roots = [];
+                    if (host) roots.push(host.shadowRoot || host);
+                    if (overlay) roots.push(overlay.shadowRoot || overlay);
+                    roots.push(document);
+                    let inputs = [];
+                    for (const rt of roots) {
+                        inputs = walkInputs(rt, new Set(), []);
+                        if (inputs.length >= 2) break;
+                    }
+                    if (inputs.length >= 2) {
+                        const fire = (el, value) => {
+                            el.focus();
+                            el.value = value;
+                            el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                            el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, composed: true }));
+                            el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Tab', bubbles: true, composed: true }));
+                            el.blur();
+                        };
+                        fire(inputs[0], '8000');
+                        fire(inputs[1], '512');
+                        return { ok: true, attempt, count: inputs.length, host: !!host, overlay: !!overlay };
+                    }
+                    await sleep(700);
+                    if (row) {
+                        const btn = row.querySelector('lightning-button-icon, button.slds-cell-edit__button, button[title="pdf"]');
+                        if (btn) btn.click();
+                    }
+                }
+                return { ok: false, reason: 'inputs-not-mounted', hostCount: document.querySelectorAll('runtime_cdp-search-index-chunking-strategy').length };
             }\"\"\")
             print(f"   [create_index] JS chunk set result: {js_chunk}", flush=True)
             if not js_chunk.get("ok"):
