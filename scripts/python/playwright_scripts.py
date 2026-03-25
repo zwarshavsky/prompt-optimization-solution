@@ -2178,6 +2178,7 @@ async def _create_search_index_ui(
             await asyncio.sleep(1)
         print("   [create_index] Waiting for New button...", flush=True)
         new_btn = page.get_by_role("button", name="New")
+        opened_new_flow_direct = False
         try:
             await new_btn.wait_for(state="visible", timeout=12000)
         except Exception:
@@ -2185,10 +2186,17 @@ async def _create_search_index_ui(
             # Fallback: go straight to the SearchIndex object list view where "New" is rendered.
             await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(1.5)
-            await new_btn.wait_for(state="visible", timeout=30000)
+            try:
+                await new_btn.wait_for(state="visible", timeout=12000)
+            except Exception:
+                print("   [create_index] 'New' still not visible; opening SearchIndex new-record URL directly...", flush=True)
+                await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
+                await asyncio.sleep(1.0)
+                opened_new_flow_direct = True
         print("   [create_index] New→Advanced Setup→Next (builder popup)...", flush=True)
-        await new_btn.click()
-        await asyncio.sleep(0.5)
+        if not opened_new_flow_direct:
+            await new_btn.click()
+            await asyncio.sleep(0.5)
         await page.get_by_text("Advanced Setup", exact=True).click()
         await asyncio.sleep(0.3)
         async with page.expect_popup(timeout=45000) as popup_info:
