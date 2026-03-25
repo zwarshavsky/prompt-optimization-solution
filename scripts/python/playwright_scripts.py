@@ -2216,31 +2216,41 @@ async def _create_search_index_ui(
         if not advanced_clicked:
             print("   [create_index] ⚠️ Advanced Setup control not found; continuing to Next fallback.", flush=True)
         await asyncio.sleep(0.3)
-        async with page.expect_popup(timeout=45000) as popup_info:
-            next_clicked = False
-            next_candidates = [
-                page.get_by_role("button", name="Next").first,
-                page.get_by_text("Next", exact=True).first,
-                page.locator("button:has-text('Next')").first,
-                page.locator("input[type='submit'][value='Next']").first,
-            ]
-            for cand in next_candidates:
-                try:
-                    if await cand.is_visible(timeout=2500):
-                        await cand.click(timeout=10000)
-                        next_clicked = True
-                        break
-                except Exception:
-                    pass
-            if not next_clicked:
-                # Last-resort click for brittle setup dialogs.
-                await page.evaluate("""() => {
-                    const btn =
-                      Array.from(document.querySelectorAll('button,input[type=\"submit\"]'))
-                        .find(el => ((el.innerText || el.value || '').trim().toLowerCase()) === 'next');
-                    if (btn) btn.click();
-                }""")
-        builder = await popup_info.value
+        next_clicked = False
+        next_candidates = [
+            page.get_by_role("button", name="Next").first,
+            page.get_by_text("Next", exact=True).first,
+            page.locator("button:has-text('Next')").first,
+            page.locator("input[type='submit'][value='Next']").first,
+        ]
+        for cand in next_candidates:
+            try:
+                if await cand.is_visible(timeout=2500):
+                    await cand.click(timeout=10000)
+                    next_clicked = True
+                    break
+            except Exception:
+                pass
+        if not next_clicked:
+            # Last-resort click for brittle setup dialogs.
+            await page.evaluate("""() => {
+                const btn =
+                  Array.from(document.querySelectorAll('button,input[type=\"submit\"]'))
+                    .find(el => ((el.innerText || el.value || '').trim().toLowerCase()) === 'next');
+                if (btn) btn.click();
+            }""")
+
+        # Some org UIs open builder in a popup, others navigate in same tab.
+        builder = None
+        try:
+            async with page.expect_popup(timeout=8000) as popup_info:
+                # Nudge the UI once more in case the first click only focused the dialog.
+                await page.keyboard.press("Enter")
+            builder = await popup_info.value
+            print("   [create_index] Builder opened in popup.", flush=True)
+        except Exception:
+            print("   [create_index] No popup detected; using current tab as builder.", flush=True)
+            builder = page
         await builder.wait_for_load_state("domcontentloaded")
         await asyncio.sleep(1)
         print("   [create_index] Builder opened. Hybrid + RagFileUDMO...", flush=True)
