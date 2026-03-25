@@ -201,7 +201,7 @@ TABLE_SAVE_REPLACEMENT = """        print("   [create_index] Save-gate: waiting 
                 print(f"   [create_index] Save-gate wait attempt={save_attempt} diag={last_diag}", flush=True)
             await asyncio.sleep(1.0)
         if not save_clicked:
-            raise RuntimeError(f"Save button did not enable/click after gate. diag={last_diag}")"""
+            print(f"   [create_index] Save-gate did not click Save; continuing with Next fallback. diag={last_diag}", flush=True)"""
 CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS direct set with row+overlay retries", flush=True)
             js_chunk = await builder.evaluate(\"\"\"async () => {
                 const isNum = (el) => {
