@@ -2161,10 +2161,21 @@ async def _create_search_index_ui(
             await browser.close()
             return (None, None)
         print("   [create_index] Navigate to Search Indexes...", flush=True)
-        await page.get_by_role("button", name="Show more navigation items").click()
-        await page.get_by_role("menuitem", name="Search Indexes").click()
-        await page.wait_for_load_state("domcontentloaded", timeout=20000)
-        await asyncio.sleep(1)
+        try:
+            # Some org layouts already land directly on Search Indexes and do not render
+            # the "Show more navigation items" control.
+            more_nav = page.get_by_role("button", name="Show more navigation items")
+            if await more_nav.is_visible(timeout=4000):
+                await more_nav.click(timeout=8000)
+                await page.get_by_role("menuitem", name="Search Indexes").click(timeout=12000)
+                await page.wait_for_load_state("domcontentloaded", timeout=20000)
+                await asyncio.sleep(1)
+            else:
+                print("   [create_index] Nav drawer button not visible; proceeding on current page.", flush=True)
+        except Exception as nav_err:
+            print(f"   [create_index] Nav drawer path failed ({nav_err}); retrying direct setup URL.", flush=True)
+            await page.goto(setup_url, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(1)
         print("   [create_index] Waiting for New button...", flush=True)
         new_btn = page.get_by_role("button", name="New")
         await new_btn.wait_for(state="visible", timeout=25000)
