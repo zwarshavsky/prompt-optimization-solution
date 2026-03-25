@@ -9,6 +9,7 @@ Currently includes:
 """
 
 import asyncio
+import base64
 import json
 import os
 import platform
@@ -2087,26 +2088,59 @@ def _index_full_name(version):
     return (version or "").strip()
 
 
-async def _create_search_index_ui(username, password, instance_url, index_name, parser_prompt, state_dir, run_id, headless, should_abort, access_token=None):
+async def _create_search_index_ui(
+    username,
+    password,
+    instance_url,
+    index_name,
+    parser_prompt,
+    state_dir,
+    run_id,
+    headless,
+    should_abort,
+    access_token=None,
+    skip_api_lookup=False,
+):
     """Create Search Index via Playwright. Returns (index_id, full_index_name). Uses API lookup by name (no URL extraction)."""
     base = instance_url.rstrip("/")
     login_url = "https://login.salesforce.com" if "salesforce.com" in base else base
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless, slow_mo=100)
-        context = await browser.new_context(viewport={"width": 1280, "height": 720})
+        # Optional browser session bootstrap from env (captured Playwright storageState).
+        # Useful for Heroku/headless runs where interactive login isn't possible each run.
+        storage_state = None
+        try:
+            auth_b64 = os.getenv("SF_AUTH_STATE_B64", "").strip()
+            if auth_b64:
+                storage_state = json.loads(base64.b64decode(auth_b64).decode("utf-8"))
+                print("   [create_index] Found SF_AUTH_STATE_B64, attempting session restore...", flush=True)
+        except Exception as e:
+            print(f"   [create_index] ⚠️ Could not decode SF_AUTH_STATE_B64: {e}", flush=True)
+            storage_state = None
+
+        context = await browser.new_context(viewport={"width": 1280, "height": 720}, storage_state=storage_state)
         page = await context.new_page()
         if should_abort():
             print("   ⚠️ DIAG: Abort at start (before login)", flush=True)
             await browser.close()
             return (None, None)
-        print("   [create_index] Logging in...", flush=True)
-        await page.goto(login_url, wait_until="networkidle", timeout=60000)
-        await page.get_by_role("textbox", name="Username").fill(username)
-        await page.get_by_role("textbox", name="Password").fill(password)
-        await page.get_by_role("button", name="Log In").click()
-        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        # First try direct setup navigation using restored session.
+        setup_url = f"{base}/lightning/setup/DataSemanticSearch/home"
+        await page.goto(setup_url, wait_until="domcontentloaded", timeout=60000)
         await asyncio.sleep(1)
         current_url = page.url
+
+        if _is_authenticated_url(current_url):
+            print(f"   [create_index] ✅ Session restore worked. URL: {current_url}", flush=True)
+        else:
+            print("   [create_index] Logging in...", flush=True)
+            await page.goto(login_url, wait_until="networkidle", timeout=60000)
+            await page.get_by_role("textbox", name="Username").fill(username)
+            await page.get_by_role("textbox", name="Password").fill(password)
+            await page.get_by_role("button", name="Log In").click()
+            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+            await asyncio.sleep(1)
+            current_url = page.url
         if _is_mfa_or_verification_url(current_url):
             page_text = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 600) : 'no-body'")
             print(f"   [create_index] MFA/verification page detected.\n   URL: {current_url}\n   Page text: {page_text}", flush=True)
@@ -2327,10 +2361,14 @@ async def _create_search_index_ui(username, password, instance_url, index_name, 
             print("   ⚠️ Common cause: index name starts with a digit (Salesforce requires letter prefix)", flush=True)
             await browser.close()
             return (None, None)
-        print("   [create_index] Save complete; looking up index ID via API...", flush=True)
-        await asyncio.sleep(3)
         full_name = _index_full_name(index_name)
         await browser.close()
+        if skip_api_lookup:
+            print("   [create_index] Save complete; skipping API lookup (UI-only mode).", flush=True)
+            return (None, full_name)
+
+        print("   [create_index] Save complete; looking up index ID via API...", flush=True)
+        await asyncio.sleep(3)
         from salesforce_api import get_salesforce_credentials, find_index_id_by_name
         if not access_token:
             _, access_token = get_salesforce_credentials(username=username, password=password, instance_url=instance_url)
