@@ -2215,23 +2215,6 @@ async def _create_search_index_ui(
                     recovered_new = True
             except Exception:
                 pass
-            # Setup "Quick Find" fallback to reach Search Indexes when left-nav sections are collapsed.
-            if not recovered_new:
-                try:
-                    quick_find = page.locator("input[placeholder*='Quick Find'], input[placeholder*='Search Setup']").first
-                    if await quick_find.is_visible(timeout=4000):
-                        await quick_find.click(timeout=4000)
-                        await quick_find.fill("Search Indexes")
-                        await asyncio.sleep(0.8)
-                        si_link = page.get_by_role("link", name="Search Indexes")
-                        if await si_link.is_visible(timeout=4000):
-                            await si_link.click(timeout=8000)
-                            await page.wait_for_load_state("domcontentloaded", timeout=20000)
-                            await asyncio.sleep(1.0)
-                            await new_btn.wait_for(state="visible", timeout=8000)
-                            recovered_new = True
-                except Exception:
-                    pass
             if not recovered_new:
                 print("   [create_index] 'New' not visible on current page; trying SearchIndex list fallback URL...", flush=True)
                 # Fallback: go straight to the SearchIndex object list view where "New" is rendered.
