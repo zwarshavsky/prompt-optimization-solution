@@ -42,23 +42,7 @@ def _new_run_id() -> str:
 
 BASELINE_HYBRID_BLOCK = """        print("   [create_index] Builder opened. Hybrid + RagFileUDMO...", flush=True)
         hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
-        try:
-            await hybrid_btn.wait_for(state="visible", timeout=15000)
-        except Exception:
-            snap_path = state_dir / f"{run_id}_baseline_hybrid_missing.png"
-            await builder.screenshot(path=str(snap_path), full_page=True)
-            try:
-                summary = await builder.evaluate(\"\"\"() => {
-                    const txt = (el) => (el && (el.innerText || el.textContent || '').trim()) || '';
-                    const buttons = Array.from(document.querySelectorAll('button, [role=\"button\"], label, span'))
-                        .map(txt).filter(Boolean).slice(0, 80);
-                    return { url: location.href, title: document.title, buttons };
-                }\"\"\")
-                print(f"   [create_index] DIAG baseline hybrid missing: {summary}", flush=True)
-            except Exception as diag_e:
-                print(f"   [create_index] DIAG baseline evaluation failed: {diag_e}", flush=True)
-            print(f"   [create_index] DIAG screenshot saved: {snap_path}", flush=True)
-            raise
+        await hybrid_btn.wait_for(state="visible", timeout=15000)
         await hybrid_btn.click()
         await asyncio.sleep(0.5)
         searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
@@ -110,9 +94,9 @@ CHUNK_FILL_BLOCK_REPLACEMENT = """        if not used_js_chunking:
 """
 BASELINE_CHUNK_ERROR_LINE = """            raise RuntimeError(f"Chunking inputs not found after 5 expand strategies. pdf_row text='{pdf_row_text}'")"""
 CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS direct set inside runtime_cdp-search-index-chunking-strategy", flush=True)
-            js_chunk = await builder.evaluate(\"\"\"() => {
-                const host = document.querySelector('runtime_cdp-search-index-chunking-strategy');
-                if (!host) return { ok: false, reason: 'host-missing' };
+            js_chunk = await pdf_row.evaluate(\"\"\"(row) => {
+                const host = row.querySelector('runtime_cdp-search-index-chunking-strategy');
+                if (!host) return { ok: false, reason: 'host-missing-in-row' };
                 const seen = new Set();
                 const out = [];
                 const walk = (root) => {
