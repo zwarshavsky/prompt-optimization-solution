@@ -8,21 +8,57 @@ can validate Step 3 behavior independently on Heroku.
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import yaml
 
-from playwright_scripts import _create_retriever_ui
 from salesforce_api import (
     SearchIndexAPI,
     get_salesforce_credentials,
     poll_retriever_until_activated,
 )
 from worker_utils import get_db_connection
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+BASELINE_RETRIEVER_CONTEXT_LINE = '        context = await browser.new_context(viewport={"width": 1280, "height": 720})'
+RETRIEVER_CONTEXT_REPLACEMENT = """        storage_state = None
+        try:
+            auth_b64 = os.getenv("SF_AUTH_STATE_B64", "").strip()
+            if auth_b64:
+                storage_state = json.loads(base64.b64decode(auth_b64).decode("utf-8"))
+                print("   [create_retriever] Found SF_AUTH_STATE_B64, attempting session restore...", flush=True)
+        except Exception as e:
+            print(f"   [create_retriever] ⚠️ Could not decode SF_AUTH_STATE_B64: {e}", flush=True)
+            storage_state = None
+        context = await browser.new_context(viewport={"width": 1280, "height": 720}, storage_state=storage_state)"""
+
+
+def _load_create_retriever_func() -> Callable:
+    source_path = SCRIPT_DIR / "playwright_scripts.py"
+    source = source_path.read_text(encoding="utf-8")
+    if BASELINE_RETRIEVER_CONTEXT_LINE in source:
+        source = source.replace(BASELINE_RETRIEVER_CONTEXT_LINE, RETRIEVER_CONTEXT_REPLACEMENT, 1)
+    else:
+        print("[retriever-harness] WARN: retriever context line not found; session-restore patch skipped.", flush=True)
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as tf:
+        tf.write(source)
+        temp_path = tf.name
+    spec = importlib.util.spec_from_file_location("playwright_scripts_retriever_harness", temp_path)
+    if not spec or not spec.loader:
+        raise RuntimeError("Failed to load temporary Playwright module for retriever harness.")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    func = getattr(module, "_create_retriever_ui", None)
+    if not callable(func):
+        raise RuntimeError("Patched module missing _create_retriever_ui.")
+    return func
 
 
 def _resolve_yaml_path(path: Path) -> Path:
@@ -129,7 +165,8 @@ async def _run(args: argparse.Namespace) -> int:
     def should_abort() -> bool:
         return False
 
-    retriever_display_name, activate_clicked = await _create_retriever_ui(
+    create_retriever_func = _load_create_retriever_func()
+    retriever_display_name, activate_clicked = await create_retriever_func(
         username=username,
         password=password,
         instance_url=instance_url,
