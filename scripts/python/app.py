@@ -16,6 +16,15 @@ import json
 import streamlit.components.v1 as components
 from typing import Any, Dict, List
 
+def _as_int(value: Any, default: int = 0) -> int:
+    """Safely coerce mixed DB/json values (e.g. '1') to int."""
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 # Debug logging setup
   # Silently fail if logging fails
 
@@ -2658,6 +2667,15 @@ elif page == "Jobs":
             output_lines = run.get('output_lines', [])
             
             # Extract step info
+            def _as_int(value, default=0):
+                """Safely coerce mixed DB/json values (e.g. '1') to int."""
+                try:
+                    if value is None or value == "":
+                        return default
+                    return int(value)
+                except (TypeError, ValueError):
+                    return default
+
             def extract_status_from_logs(output_lines):
                 if not output_lines:
                     return None, None, None
@@ -2679,8 +2697,8 @@ elif page == "Jobs":
                 return step_num, cycle_num, None
             
             step_num, cycle_from_log, _ = extract_status_from_logs(output_lines)
-            current_cycle = progress.get('cycle') or cycle_from_log or 0
-            current_step = progress.get('step') or step_num or 0
+            current_cycle = _as_int(progress.get('cycle'), _as_int(cycle_from_log, 0))
+            current_step = _as_int(progress.get('step'), _as_int(step_num, 0))
             
             step_names = {
                 1: 'Updating Search Index',
@@ -2884,10 +2902,10 @@ elif page == "Jobs":
                 stage_name = refinement_stage_names.get(refinement_stage, 'LLM Refinement')
                 
                 # Use cycle from progress or logs
-                current_cycle = progress.get('cycle') or cycle_from_log or 0
+                current_cycle = _as_int(progress.get('cycle'), _as_int(cycle_from_log, 0))
                 
                 # Get current step
-                current_step = progress.get('step') or step_num or 0
+                current_step = _as_int(progress.get('step'), _as_int(step_num, 0))
                 
                 # Step names and descriptions
                 step_names = {
@@ -2968,7 +2986,7 @@ elif page == "Jobs":
                             st.error(f"**Error Details:** {error_details}")
                         # Show which step failed if available
                         if progress.get('step'):
-                            failed_step = progress.get('step')
+                            failed_step = _as_int(progress.get('step'), 0)
                             step_name = step_names.get(failed_step, f'Step {failed_step}')
                             st.error(f"**Failed at:** Cycle {current_cycle} - {step_name}")
                     else:
@@ -3024,7 +3042,7 @@ elif page == "Jobs":
                             st.caption(time_message)
                             
                             # Show note about index update taking up to an hour (only for Step 1)
-                            current_step = progress.get('step', 0)
+                            current_step = _as_int(progress.get('step'), 0)
                             if current_step == 1:
                                 st.info("ℹ️ **Note:** The index update stage (Step 1) can take up to an hour. Please be patient.")
                             
@@ -3060,7 +3078,8 @@ elif page == "Jobs":
                         st.info(f"ℹ️ Starting Cycle {current_cycle}...")
                     elif progress.get('step'):
                         step_names = {1: 'Updating Search Index', 2: 'Testing Index', 3: 'Analyzing Results'}
-                        step_name = step_names.get(progress.get('step'), f'Step {progress.get("step")}')
+                        progress_step = _as_int(progress.get('step'), 0)
+                        step_name = step_names.get(progress_step, f'Step {progress_step}')
                         st.info(f"ℹ️ Running Cycle {current_cycle} - {step_name}...")
                     else:
                         st.info("ℹ️ Workflow is running. Output will appear here as progress updates are received.")
@@ -3068,7 +3087,7 @@ elif page == "Jobs":
                 # Show additional progress details
                 if current_cycle > 0:
                     # Determine current step from progress or parsed logs
-                    current_step = progress.get('step') or step_num
+                    current_step = _as_int(progress.get('step'), _as_int(step_num, 0))
                     step_names_display = {1: 'Update Index', 2: 'Test Index', 3: 'Analyze Results'}
                     
                     if current_step and current_step > 0:
