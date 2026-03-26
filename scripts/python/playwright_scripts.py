@@ -2418,6 +2418,7 @@ async def _create_search_index_ui(
             await searchbox.fill("rag")
         await asyncio.sleep(2.5)
         row_with_dmo = builder.locator("tr").filter(has_text="RagFileUDMO")
+        row_selected_via_js = False
         try:
             await row_with_dmo.first.wait_for(state="visible", timeout=15000)
         except Exception:
@@ -2461,10 +2462,12 @@ async def _create_search_index_ui(
             print(f"   [create_index] js row select fallback={js_row_clicked}", flush=True)
             if not js_row_clicked:
                 raise
-        try:
-            await row_with_dmo.locator("label.slds-radio__label, .slds-radio__label").first.click(timeout=12000)
-        except Exception:
-            await row_with_dmo.locator("input[type='radio']").first.click(force=True, timeout=8000)
+            row_selected_via_js = True
+        if not row_selected_via_js:
+            try:
+                await row_with_dmo.locator("label.slds-radio__label, .slds-radio__label").first.click(timeout=12000)
+            except Exception:
+                await row_with_dmo.locator("input[type='radio']").first.click(force=True, timeout=8000)
         await asyncio.sleep(0.5)
         await builder.get_by_role("button", name="Next").click()
         await asyncio.sleep(1)
