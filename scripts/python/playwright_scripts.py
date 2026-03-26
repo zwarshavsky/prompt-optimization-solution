@@ -2410,12 +2410,57 @@ async def _create_search_index_ui(
                     }""")
                     print(f"   [create_index] js search fill fallback={js_search_filled}", flush=True)
                     if not js_search_filled:
-                        raise
+                        # Some org variants do not expose a usable searchbox in this step.
+                        # Continue and attempt direct row selection below.
+                        print("   [create_index] ⚠️ No usable searchbox found; proceeding with direct DMO row lookup.", flush=True)
             await asyncio.sleep(0.3)
         else:
             await searchbox.fill("rag")
         await asyncio.sleep(2.5)
         row_with_dmo = builder.locator("tr").filter(has_text="RagFileUDMO")
+        try:
+            await row_with_dmo.first.wait_for(state="visible", timeout=15000)
+        except Exception:
+            # Fallback for variants that render rows in non-table containers or shadow roots.
+            js_row_clicked = await builder.evaluate("""() => {
+                const roots = [document];
+                const seen = new Set([document]);
+                const stack = [document];
+                while (stack.length) {
+                    const root = stack.pop();
+                    if (!root || !root.querySelectorAll) continue;
+                    root.querySelectorAll('*').forEach((el) => {
+                        if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+                            seen.add(el.shadowRoot);
+                            roots.push(el.shadowRoot);
+                            stack.push(el.shadowRoot);
+                        }
+                    });
+                }
+                const isVisible = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const s = window.getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                };
+                for (const r of roots) {
+                    if (!r.querySelectorAll) continue;
+                    const candidates = r.querySelectorAll("tr,li,div,[role='row']");
+                    for (const el of candidates) {
+                        const txt = ((el.innerText || el.textContent || "") + "").toLowerCase();
+                        if (!txt.includes("ragfileudmo")) continue;
+                        if (!isVisible(el)) continue;
+                        const radio = el.querySelector("input[type='radio'], [role='radio'], label, .slds-radio__label");
+                        try {
+                            (radio || el).click();
+                            return true;
+                        } catch (_) {}
+                    }
+                }
+                return false;
+            }""")
+            print(f"   [create_index] js row select fallback={js_row_clicked}", flush=True)
+            if not js_row_clicked:
+                raise
         try:
             await row_with_dmo.locator("label.slds-radio__label, .slds-radio__label").first.click(timeout=12000)
         except Exception:
