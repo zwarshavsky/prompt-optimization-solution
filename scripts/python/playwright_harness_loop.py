@@ -853,6 +853,7 @@ async def _run_once(
             headless=headless,
             should_abort=should_abort,
             access_token=access_token,
+            skip_api_lookup=True,
         )
         # UI save can succeed before list APIs become eventually consistent.
         # If ID lookup missed in create step, do an extended retry here.
