@@ -61,6 +61,41 @@ def _load_create_retriever_func() -> Callable:
     return func
 
 
+def _upsert_harness_run(run_id: str, status: str, message: str) -> None:
+    if not run_id:
+        return
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO runs (
+                    run_id, status, config, progress, output_lines,
+                    results, checkpoint_info, updated_at, heartbeat_at, started_at
+                ) VALUES (
+                    %s, %s, %s::jsonb, %s::jsonb, '[]'::jsonb,
+                    '{}'::jsonb, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (run_id) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    progress = EXCLUDED.progress,
+                    updated_at = CURRENT_TIMESTAMP,
+                    heartbeat_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    run_id,
+                    status,
+                    json.dumps({"mode": "playwright_retriever_harness"}),
+                    json.dumps({"status": status, "message": message}),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _resolve_yaml_path(path: Path) -> Path:
     if path.exists():
         return path
@@ -140,6 +175,7 @@ def _latest_index_name_for_prefix(instance_url: str, access_token: str, prefix: 
 
 
 async def _run(args: argparse.Namespace) -> int:
+    _upsert_harness_run(args.run_id, "running", "Retriever harness starting")
     try:
         yaml_cfg = _load_yaml(Path(args.yaml))
     except Exception as yaml_err:
@@ -198,6 +234,11 @@ async def _run(args: argparse.Namespace) -> int:
         result["ok"] = result["ok"] and bool(api_name)
 
     print(f"[retriever-harness] result={json.dumps(result)}", flush=True)
+    _upsert_harness_run(
+        args.run_id,
+        "completed" if result["ok"] else "failed",
+        f"retriever={result.get('retriever_display_name') or 'none'} activated={result.get('activated', False)}",
+    )
     return 0 if result["ok"] else 1
 
 
