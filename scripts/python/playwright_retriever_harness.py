@@ -22,6 +22,7 @@ from salesforce_api import (
     get_salesforce_credentials,
     poll_retriever_until_activated,
 )
+from worker_utils import get_db_connection
 
 
 def _resolve_yaml_path(path: Path) -> Path:
@@ -45,6 +46,34 @@ def _load_yaml(path: Path) -> dict:
     resolved = _resolve_yaml_path(path)
     with resolved.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
+
+
+def _load_config_from_db() -> dict:
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("No database connection available for retriever harness config fallback.")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT config
+                FROM runs
+                WHERE config IS NOT NULL
+                  AND config::text <> 'null'
+                  AND config ? 'configuration'
+                ORDER BY updated_at DESC
+                LIMIT 20
+                """
+            )
+            rows = cur.fetchall()
+        for row in rows:
+            cfg = row[0] if row and row[0] else {}
+            sf = (cfg.get("configuration", {}) or {}).get("salesforce", {}) if isinstance(cfg, dict) else {}
+            if sf.get("username") and sf.get("password") and sf.get("instanceUrl"):
+                return cfg
+    finally:
+        conn.close()
+    raise RuntimeError("No valid config with Salesforce credentials found in runs table.")
 
 
 def _extract_sf_creds(config: dict) -> Tuple[str, str, str]:
@@ -75,7 +104,11 @@ def _latest_index_name_for_prefix(instance_url: str, access_token: str, prefix: 
 
 
 async def _run(args: argparse.Namespace) -> int:
-    yaml_cfg = _load_yaml(Path(args.yaml))
+    try:
+        yaml_cfg = _load_yaml(Path(args.yaml))
+    except Exception as yaml_err:
+        print(f"[retriever-harness] YAML load failed ({yaml_err}); trying DB config fallback...", flush=True)
+        yaml_cfg = _load_config_from_db()
     username, password, instance_url_cfg = _extract_sf_creds(yaml_cfg)
     instance_url, access_token = get_salesforce_credentials(
         username=username, password=password, instance_url=instance_url_cfg
