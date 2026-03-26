@@ -449,9 +449,6 @@ def load_runs() -> List[Dict]:
     conn = get_db_connection()
     if conn:
         try:
-            # Initialize database if needed
-            init_database()
-            
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT run_id, status, config, progress, output_lines, 
@@ -569,9 +566,6 @@ def save_runs(runs: List[Dict]) -> None:
     conn = get_db_connection()
     if conn:
         try:
-            # Initialize database if needed
-            init_database()
-            
             with conn.cursor() as cur:
                 for run in runs:
                     # Convert datetime objects to strings for JSONB storage
