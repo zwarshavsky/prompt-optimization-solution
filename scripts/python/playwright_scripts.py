@@ -2417,8 +2417,9 @@ async def _create_search_index_ui(
         else:
             await searchbox.fill("rag")
         await asyncio.sleep(2.5)
-        row_with_dmo = builder.locator("tr").filter(has_text="RagFileUDMO")
+        row_with_dmo = builder.locator("tr,li,div,[role='row']").filter(has_text=re.compile(r"rag\\s*file\\s*udmo|ragfileudmo", re.I))
         row_selected_via_js = False
+        row_selected_via_locator = False
         try:
             await row_with_dmo.first.wait_for(state="visible", timeout=15000)
         except Exception:
@@ -2448,7 +2449,7 @@ async def _create_search_index_ui(
                     const candidates = r.querySelectorAll("tr,li,div,[role='row']");
                     for (const el of candidates) {
                         const txt = ((el.innerText || el.textContent || "") + "").toLowerCase();
-                        if (!txt.includes("ragfileudmo")) continue;
+                        if (!(txt.includes("ragfileudmo") || txt.includes("rag file udmo") || (txt.includes("rag") && txt.includes("udmo")))) continue;
                         if (!isVisible(el)) continue;
                         const radio = el.querySelector("input[type='radio'], [role='radio'], label, .slds-radio__label");
                         try {
@@ -2461,15 +2462,28 @@ async def _create_search_index_ui(
             }""")
             print(f"   [create_index] js row select fallback={js_row_clicked}", flush=True)
             if not js_row_clicked:
-                raise
+                print("   [create_index] ⚠️ RagFileUDMO row not directly selectable; attempting Next in case selection is already defaulted.", flush=True)
             row_selected_via_js = True
         if not row_selected_via_js:
             try:
                 await row_with_dmo.locator("label.slds-radio__label, .slds-radio__label").first.click(timeout=12000)
+                row_selected_via_locator = True
             except Exception:
-                await row_with_dmo.locator("input[type='radio']").first.click(force=True, timeout=8000)
+                try:
+                    await row_with_dmo.locator("input[type='radio'], [role='radio']").first.click(force=True, timeout=8000)
+                    row_selected_via_locator = True
+                except Exception:
+                    print("   [create_index] ⚠️ Locator row click failed; attempting Next fallback.", flush=True)
         await asyncio.sleep(0.5)
-        await builder.get_by_role("button", name="Next").click()
+        try:
+            await builder.get_by_role("button", name="Next").click(timeout=10000)
+        except Exception:
+            if row_selected_via_js or row_selected_via_locator:
+                raise
+            # Last-resort: if the UI preselected a default object, Next can still work
+            # after a brief render delay.
+            await asyncio.sleep(1.0)
+            await builder.get_by_role("button", name="Next").click(timeout=12000)
         await asyncio.sleep(1)
         for parser_label in ["LLM-based Parser", "LLM Parser"]:
             loc = builder.get_by_text(parser_label, exact=True)
