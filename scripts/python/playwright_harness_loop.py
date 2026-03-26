@@ -184,7 +184,7 @@ POST_CHUNK_NEXT_REPLACEMENT = """        await builder.get_by_role("button", nam
             if jumped and await _name_visible():
                 print("   [create_index] Reached naming step via explicit Review and Build jump.", flush=True)
             else:
-                raise RuntimeError("Did not reach naming step after Next advances or Review jump.")"""
+                print("   [create_index] WARN: naming step not confirmed yet; deferring to final Save-gate.", flush=True)"""
 BASELINE_FINAL_SAVE_LINE = '        await builder.get_by_role("button", name="Save").click()'
 FINAL_SAVE_REPLACEMENT = """        print("   [create_index] Final Save-gate: waiting for review state + enabled Save...", flush=True)
         final_saved = False
@@ -207,6 +207,19 @@ FINAL_SAVE_REPLACEMENT = """        print("   [create_index] Final Save-gate: wa
                         try:
                             await next_btn.first.click(timeout=8000)
                             await asyncio.sleep(0.8)
+                        except Exception:
+                            pass
+                if final_attempt % 5 == 0:
+                    for review_sel in [
+                        builder.get_by_role("link", name="Review and Build"),
+                        builder.get_by_text("Review and Build", exact=False),
+                        builder.locator("a:has-text('Review and Build')"),
+                    ]:
+                        try:
+                            if await review_sel.count() > 0 and await review_sel.first.is_visible():
+                                await review_sel.first.click(timeout=8000)
+                                await asyncio.sleep(0.8)
+                                break
                         except Exception:
                             pass
                 await asyncio.sleep(0.5)
