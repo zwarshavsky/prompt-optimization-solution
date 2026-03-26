@@ -2462,8 +2462,9 @@ async def _create_search_index_ui(
             }""")
             print(f"   [create_index] js row select fallback={js_row_clicked}", flush=True)
             if not js_row_clicked:
-                print("   [create_index] ⚠️ RagFileUDMO row not directly selectable; attempting Next in case selection is already defaulted.", flush=True)
-            row_selected_via_js = True
+                print("   [create_index] ⚠️ RagFileUDMO row not directly selectable; attempting locator row/radio selection next.", flush=True)
+            # IMPORTANT: only treat JS row selection as successful when it actually clicked.
+            row_selected_via_js = bool(js_row_clicked)
         if not row_selected_via_js:
             try:
                 await row_with_dmo.locator("label.slds-radio__label, .slds-radio__label").first.click(timeout=12000)
