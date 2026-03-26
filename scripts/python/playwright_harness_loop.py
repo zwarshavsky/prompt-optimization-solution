@@ -29,7 +29,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from salesforce_api import find_index_id_by_name, get_next_index_name, get_salesforce_credentials  # noqa: E402
+from salesforce_api import get_next_index_name, get_salesforce_credentials  # noqa: E402
 from worker_utils import get_db_connection  # noqa: E402
 
 
@@ -855,20 +855,6 @@ async def _run_once(
             access_token=access_token,
             skip_api_lookup=True,
         )
-        # UI save can succeed before list APIs become eventually consistent.
-        # If ID lookup missed in create step, do an extended retry here.
-        if not index_id and full_name:
-            try:
-                print(f"[harness] extended index lookup for '{full_name}' (up to 18 attempts)...", flush=True)
-                index_id = find_index_id_by_name(
-                    instance_url,
-                    access_token,
-                    full_name,
-                    max_attempts=18,
-                    retry_delay_seconds=10,
-                )
-            except Exception as lookup_err:
-                print(f"[harness] extended lookup error: {lookup_err}", flush=True)
         elapsed = round(time.time() - started, 2)
         ok = bool(index_id or full_name)
         _upsert_harness_run(
