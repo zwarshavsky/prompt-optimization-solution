@@ -197,6 +197,8 @@ POST_CHUNK_NEXT_REPLACEMENT = """        await builder.get_by_role("button", nam
             else:
                 print("   [create_index] WARN: naming step not confirmed yet; deferring to final Save-gate.", flush=True)"""
 BASELINE_FINAL_SAVE_LINE = '        await builder.get_by_role("button", name="Save").click()'
+BASELINE_LOOKUP_RETURN_LINE = "        return (index_id, full_name if index_id else None)"
+LOOKUP_RETURN_REPLACEMENT = "        return (index_id, full_name)"
 FINAL_SAVE_REPLACEMENT = """        print("   [create_index] Final Save-gate: waiting for review state + enabled Save...", flush=True)
         final_saved = False
         final_diag = {}
@@ -697,6 +699,10 @@ def _load_create_index_func(strategy: str) -> Callable:
         source = source.replace(BASELINE_FINAL_SAVE_LINE, FINAL_SAVE_REPLACEMENT, 1)
     else:
         print("[harness] WARN: final Save line not found; final save-gate patch skipped.", flush=True)
+    if BASELINE_LOOKUP_RETURN_LINE in source:
+        source = source.replace(BASELINE_LOOKUP_RETURN_LINE, LOOKUP_RETURN_REPLACEMENT, 1)
+    else:
+        print("[harness] WARN: lookup return line not found; full_name retention patch skipped.", flush=True)
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as tf:
         tf.write(source)
         temp_path = tf.name
