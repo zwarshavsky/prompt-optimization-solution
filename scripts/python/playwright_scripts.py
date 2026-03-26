@@ -2525,13 +2525,27 @@ async def _create_search_index_ui(
             raise RuntimeError(f"Unable to click Next at stage '{stage_label}'")
 
         await asyncio.sleep(0.5)
-        if row_selected_via_js or row_selected_via_locator:
-            await _click_next_resilient("post-dmo-selection")
-        else:
-            # Last-resort: if the UI preselected a default object, Next can still work
-            # after a brief render delay.
-            await asyncio.sleep(1.0)
-            await _click_next_resilient("post-dmo-selection-preselected")
+        try:
+            if row_selected_via_js or row_selected_via_locator:
+                await _click_next_resilient("post-dmo-selection")
+            else:
+                # Last-resort: if the UI preselected a default object, Next can still work
+                # after a brief render delay.
+                await asyncio.sleep(1.0)
+                await _click_next_resilient("post-dmo-selection-preselected")
+        except Exception as next_err:
+            # Some UI variants auto-advance to parser step without exposing a clickable Next.
+            parser_step_visible = False
+            for parser_label in ["LLM-based Parser", "LLM Parser"]:
+                try:
+                    if await builder.get_by_text(parser_label, exact=True).first.is_visible():
+                        parser_step_visible = True
+                        break
+                except Exception:
+                    pass
+            if not parser_step_visible:
+                raise next_err
+            print("   [create_index] ⚠️ Next unavailable but parser step already visible; continuing.", flush=True)
         await asyncio.sleep(1)
         for parser_label in ["LLM-based Parser", "LLM Parser"]:
             loc = builder.get_by_text(parser_label, exact=True)
