@@ -2156,6 +2156,48 @@ async def _create_search_index_ui(
             print(f"   ❌ Login did not reach authenticated URL. Current URL: {current_url}", flush=True)
             await browser.close()
             return (None, None)
+        lightning_base = base.replace(".my.salesforce.com", ".lightning.force.com")
+
+        # Force an authenticated Lightning app-context handoff when possible.
+        # This mitigates session restore landing on non-app login contexts.
+        if access_token:
+            frontdoor_candidates = [
+                f"{lightning_base}/secur/frontdoor.jsp?sid={access_token}&retURL=%2Flightning%2Fo%2FDataSemanticSearch%2Flist%3FfilterName%3D__Recent",
+                f"{base}/secur/frontdoor.jsp?sid={access_token}&retURL=%2Flightning%2Fo%2FDataSemanticSearch%2Flist%3FfilterName%3D__Recent",
+            ]
+            for fdc in frontdoor_candidates:
+                try:
+                    await page.goto(fdc, wait_until="domcontentloaded", timeout=60000)
+                    await asyncio.sleep(1.0)
+                    fd_url = page.url
+                    new_btn_probe = page.get_by_role("button", name="New")
+                    if await new_btn_probe.count() > 0:
+                        print(f"   [create_index] frontdoor selected (New visible): {fd_url}", flush=True)
+                        break
+                    print(f"   [create_index] frontdoor landed without New: {fd_url}", flush=True)
+                except Exception as e:
+                    print(f"   [create_index] frontdoor candidate failed: {fdc} err={e}", flush=True)
+
+        # Prefer object-list candidates where New button is rendered deterministically.
+        setup_candidates = [
+            f"{lightning_base}/lightning/o/DataSemanticSearch/list?filterName=__Recent",
+            f"{lightning_base}/lightning/o/DataSemanticSearch/home",
+            f"{base}/lightning/o/DataSemanticSearch/list?filterName=__Recent",
+            f"{base}/lightning/o/DataSemanticSearch/home",
+            setup_url,
+        ]
+        for cand in setup_candidates:
+            try:
+                await page.goto(cand, wait_until="domcontentloaded", timeout=60000)
+                await asyncio.sleep(1.0)
+                cur = page.url
+                new_btn_probe = page.get_by_role("button", name="New")
+                if await new_btn_probe.count() > 0:
+                    print(f"   [create_index] object-list candidate selected (New visible): {cur}", flush=True)
+                    break
+            except Exception:
+                continue
+
         if should_abort():
             print("   ⚠️ DIAG: Abort after login, before Search Indexes", flush=True)
             await browser.close()
@@ -2253,14 +2295,78 @@ async def _create_search_index_ui(
             builder = page
         await builder.wait_for_load_state("domcontentloaded")
         await asyncio.sleep(1)
-        print("   [create_index] Builder opened. Hybrid + RagFileUDMO...", flush=True)
-        hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
-        await hybrid_btn.wait_for(state="visible", timeout=15000)
-        await hybrid_btn.click()
-        await asyncio.sleep(0.5)
+        print("   [create_index] Builder opened. Hybrid + RagFileUDMO... [baseline_resilient]", flush=True)
         searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
-        await searchbox.wait_for(state="visible", timeout=15000)
-        await searchbox.fill("rag")
+        try:
+            await searchbox.wait_for(state="visible", timeout=7000)
+            print("   [create_index] searchbox visible without Hybrid click.", flush=True)
+        except Exception:
+            hybrid_candidates = [
+                builder.get_by_role("radio", name=re.compile("hybrid", re.IGNORECASE)).first,
+                builder.get_by_role("button", name=re.compile("hybrid", re.IGNORECASE)).first,
+                builder.get_by_text("Hybrid search", exact=False).first,
+                builder.get_by_text("Hybrid Search", exact=False).first,
+            ]
+            hybrid_clicked = False
+            for cand in hybrid_candidates:
+                try:
+                    if await cand.count() > 0:
+                        await cand.first.wait_for(state="visible", timeout=4000)
+                        await cand.first.click(timeout=6000)
+                        hybrid_clicked = True
+                        break
+                except Exception:
+                    pass
+            if not hybrid_clicked:
+                js_clicked = await builder.evaluate("""() => {
+                    const roots = [document];
+                    const seen = new Set([document]);
+                    const stack = [document];
+                    while (stack.length) {
+                        const root = stack.pop();
+                        if (!root || !root.querySelectorAll) continue;
+                        root.querySelectorAll('*').forEach((el) => {
+                            if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+                                seen.add(el.shadowRoot);
+                                roots.push(el.shadowRoot);
+                                stack.push(el.shadowRoot);
+                            }
+                        });
+                    }
+                    const isVisible = (el) => {
+                        const r = el.getBoundingClientRect();
+                        const s = window.getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    const hybridish = [];
+                    for (const r of roots) {
+                        if (!r.querySelectorAll) continue;
+                        r.querySelectorAll('button,[role="button"],[role="radio"],label,span,div').forEach((el) => {
+                            const t = ((el.innerText || el.textContent || '') + '').trim().toLowerCase();
+                            if (t.includes('hybrid')) hybridish.push(el);
+                        });
+                    }
+                    for (const el of hybridish) {
+                        if (!isVisible(el)) continue;
+                        try { el.click(); return true; } catch (_) {}
+                    }
+                    return false;
+                }""")
+                print(f"   [create_index] hybrid js_click={js_clicked}", flush=True)
+                await asyncio.sleep(0.6)
+            searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
+            broad_search = builder.locator(
+                "input[placeholder*='Search data model objects'], input[placeholder*='Search Data Model Objects'], input[type='search'], [role='searchbox']"
+            ).first
+            try:
+                await searchbox.wait_for(state="visible", timeout=10000)
+                await searchbox.fill("rag")
+            except Exception:
+                await broad_search.wait_for(state="visible", timeout=10000)
+                await broad_search.fill("rag")
+            await asyncio.sleep(0.3)
+        else:
+            await searchbox.fill("rag")
         await asyncio.sleep(2.5)
         row_with_dmo = builder.locator("tr").filter(has_text="RagFileUDMO")
         try:
@@ -2497,7 +2603,16 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless, slow_mo=100)
-        context = await browser.new_context(viewport={"width": 1280, "height": 720})
+        storage_state = None
+        try:
+            auth_b64 = os.getenv("SF_AUTH_STATE_B64", "").strip()
+            if auth_b64:
+                storage_state = json.loads(base64.b64decode(auth_b64).decode("utf-8"))
+                print("   [create_retriever] Found SF_AUTH_STATE_B64, attempting session restore...", flush=True)
+        except Exception as e:
+            print(f"   [create_retriever] ⚠️ Could not decode SF_AUTH_STATE_B64: {e}", flush=True)
+            storage_state = None
+        context = await browser.new_context(viewport={"width": 1280, "height": 720}, storage_state=storage_state)
         page = await context.new_page()
         if should_abort():
             await browser.close()
@@ -2847,7 +2962,7 @@ async def run_new_index_pipeline(
     """
     from salesforce_api import (
         get_salesforce_credentials, get_next_index_name, poll_index_until_ready,
-        poll_retriever_until_activated, update_genai_prompt_with_retriever,
+        poll_retriever_until_activated, update_genai_prompt_with_retriever, find_index_id_by_name,
     )
 
     def should_abort():
@@ -2880,6 +2995,22 @@ async def run_new_index_pipeline(
             except Exception:
                 pass
         raise
+
+    # UI save can beat API list consistency; recover by name lookup before failing step 1.
+    if not index_id and full_index_name and not should_abort():
+        print(f"   [create_index] index_id missing after UI save; retrying lookup by name: {full_index_name}", flush=True)
+        try:
+            index_id = find_index_id_by_name(
+                instance_url=instance_url,
+                access_token=access_token,
+                index_name=full_index_name,
+                max_attempts=6,
+                retry_delay_seconds=5,
+            )
+            if index_id:
+                print(f"   [create_index] recovered index_id via name lookup: {index_id}", flush=True)
+        except Exception as lookup_err:
+            print(f"   [create_index] lookup-by-name recovery failed: {lookup_err}", flush=True)
 
     if not index_id or should_abort():
         if should_abort():
