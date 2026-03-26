@@ -139,7 +139,7 @@ POST_CHUNK_NEXT_REPLACEMENT = """        await builder.get_by_role("button", nam
             c3 = await builder.get_by_role("textbox", name="Name").count()
             return (c1 + c2 + c3) > 0
 
-        for adv in range(1, 8):
+        for adv in range(1, 11):
             if await _name_visible():
                 print(f"   [create_index] Reached naming step at adv={adv}", flush=True)
                 break
@@ -166,7 +166,25 @@ POST_CHUNK_NEXT_REPLACEMENT = """        await builder.get_by_role("button", nam
             print(f"   [create_index] step_probe adv={adv}: {step_probe}", flush=True)
 
         if not await _name_visible():
-            raise RuntimeError("Did not reach naming step after Next advances.")"""
+            print("   [create_index] Next progression stalled; trying explicit Review and Build jump...", flush=True)
+            jumped = False
+            for review_sel in [
+                builder.get_by_role("link", name="Review and Build"),
+                builder.get_by_text("Review and Build", exact=False),
+                builder.locator("a:has-text('Review and Build')"),
+            ]:
+                try:
+                    if await review_sel.count() > 0 and await review_sel.first.is_visible():
+                        await review_sel.first.click(timeout=10000)
+                        await asyncio.sleep(1.2)
+                        jumped = True
+                        break
+                except Exception:
+                    pass
+            if jumped and await _name_visible():
+                print("   [create_index] Reached naming step via explicit Review and Build jump.", flush=True)
+            else:
+                raise RuntimeError("Did not reach naming step after Next advances or Review jump.")"""
 BASELINE_FINAL_SAVE_LINE = '        await builder.get_by_role("button", name="Save").click()'
 FINAL_SAVE_REPLACEMENT = """        print("   [create_index] Final Save-gate: waiting for review state + enabled Save...", flush=True)
         final_saved = False
