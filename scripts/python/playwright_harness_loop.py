@@ -98,6 +98,143 @@ BASELINE_TABLE_SAVE_BLOCK = """        save_btn = builder.get_by_role("table").g
         if await save_btn.is_visible():
             await save_btn.click()
             await asyncio.sleep(1)"""
+BASELINE_POST_CHUNK_NEXT_BLOCK = """        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)
+        emb_dropdown = builder.get_by_label("Select embedding Model").or_(builder.get_by_label("Select embedding Models"))
+        if await emb_dropdown.count() > 0:
+            await emb_dropdown.first.click()
+            await asyncio.sleep(0.3)
+            await builder.get_by_text("Salesforce Embedding V2 Small", exact=True).click()
+        else:
+            for model_name in ["Salesforce Embedding V2 Small", "Embedding V2 Small", "V2 Small"]:
+                loc = builder.get_by_text(model_name, exact=False)
+                if await loc.count() > 0:
+                    await loc.first.click()
+                    break
+        await asyncio.sleep(0.3)
+        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)
+        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)
+        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)"""
+POST_CHUNK_NEXT_REPLACEMENT = """        await builder.get_by_role("button", name="Next").click()
+        await asyncio.sleep(1)
+        emb_dropdown = builder.get_by_label("Select embedding Model").or_(builder.get_by_label("Select embedding Models"))
+        if await emb_dropdown.count() > 0:
+            await emb_dropdown.first.click()
+            await asyncio.sleep(0.3)
+            await builder.get_by_text("Salesforce Embedding V2 Small", exact=True).click()
+        else:
+            for model_name in ["Salesforce Embedding V2 Small", "Embedding V2 Small", "V2 Small"]:
+                loc = builder.get_by_text(model_name, exact=False)
+                if await loc.count() > 0:
+                    await loc.first.click()
+                    break
+        await asyncio.sleep(0.3)
+
+        async def _name_visible():
+            c1 = await builder.get_by_role("textbox", name="Search Index Configuration Name").count()
+            c2 = await builder.get_by_role("textbox", name="Configuration Name").count()
+            c3 = await builder.get_by_role("textbox", name="Name").count()
+            return (c1 + c2 + c3) > 0
+
+        for adv in range(1, 8):
+            if await _name_visible():
+                print(f"   [create_index] Reached naming step at adv={adv}", flush=True)
+                break
+            try:
+                await builder.get_by_role("button", name="Next").click(timeout=10000)
+            except Exception as e:
+                print(f"   [create_index] Next click failed at adv={adv}: {e}", flush=True)
+                break
+            await asyncio.sleep(1.0)
+            step_probe = await builder.evaluate(\"\"\"() => {
+                const headings = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'))
+                    .map(h => (h.innerText || h.textContent || '').trim())
+                    .filter(Boolean)
+                    .slice(0, 4);
+                const saves = Array.from(document.querySelectorAll('button'))
+                    .map(b => ({
+                        t: (b.innerText || b.textContent || '').trim(),
+                        d: !!b.disabled || b.getAttribute('aria-disabled') === 'true'
+                    }))
+                    .filter(x => x.t && (x.t === 'Save' || x.t.includes('Save') || x.t === 'Build'))
+                    .slice(0, 4);
+                return { headings, saves, url: location.href };
+            }\"\"\")
+            print(f"   [create_index] step_probe adv={adv}: {step_probe}", flush=True)
+
+        if not await _name_visible():
+            raise RuntimeError("Did not reach naming step after Next advances.")"""
+BASELINE_FINAL_SAVE_LINE = '        await builder.get_by_role("button", name="Save").click()'
+FINAL_SAVE_REPLACEMENT = """        print("   [create_index] Final Save-gate: waiting for review state + enabled Save...", flush=True)
+        final_saved = False
+        final_diag = {}
+        for final_attempt in range(1, 61):
+            review_ready = (
+                await builder.get_by_role("textbox", name="Search Index Configuration Name").count()
+                + await builder.get_by_role("textbox", name="Configuration Name").count()
+                + await builder.get_by_role("textbox", name="Name").count()
+            ) > 0
+            if not review_ready:
+                # Keep moving only if Next is visibly enabled.
+                next_btn = builder.get_by_role("button", name="Next")
+                if await next_btn.count() > 0 and await next_btn.first.is_visible():
+                    next_disabled = (
+                        (await next_btn.first.get_attribute("disabled")) is not None
+                        or (await next_btn.first.get_attribute("aria-disabled")) == "true"
+                    )
+                    if not next_disabled:
+                        try:
+                            await next_btn.first.click(timeout=8000)
+                            await asyncio.sleep(0.8)
+                        except Exception:
+                            pass
+                await asyncio.sleep(0.5)
+                continue
+
+            save_btn = builder.get_by_role("button", name="Save").first
+            if await save_btn.is_visible():
+                disabled = await save_btn.get_attribute("disabled")
+                aria_disabled = await save_btn.get_attribute("aria-disabled")
+                cls = (await save_btn.get_attribute("class")) or ""
+                is_disabled = (disabled is not None) or (aria_disabled == "true") or ("disabled" in cls.lower())
+                if not is_disabled:
+                    await save_btn.click(timeout=10000)
+                    final_saved = True
+                    print(f"   [create_index] Final Save-gate: clicked Save on attempt {final_attempt}", flush=True)
+                    break
+
+            final_diag = await builder.evaluate(\"\"\"() => {
+                const t = (el) => ((el && (el.innerText || el.textContent)) || '').trim();
+                const steps = Array.from(document.querySelectorAll('a,button'))
+                    .map((el) => t(el))
+                    .filter((x) => [
+                        'Search Type and Source Object',
+                        'Parsing',
+                        'Pre-Processing',
+                        'Chunking',
+                        'Vectorization',
+                        'Fields for Filtering',
+                        'Ranking',
+                        'Review and Build'
+                    ].includes(x));
+                const saves = Array.from(document.querySelectorAll('button'))
+                    .filter((b) => t(b) === 'Save')
+                    .map((b) => ({
+                        disabled: !!b.disabled || b.getAttribute('aria-disabled') === 'true',
+                        ariaDisabled: b.getAttribute('aria-disabled'),
+                        cls: b.className || ''
+                    }));
+                return { steps: Array.from(new Set(steps)), saves: saves.slice(0, 3), url: location.href };
+            }\"\"\")
+            if final_attempt % 5 == 0:
+                print(f"   [create_index] Final Save-gate wait attempt={final_attempt} diag={final_diag}", flush=True)
+            await asyncio.sleep(1.0)
+
+        if not final_saved:
+            raise RuntimeError(f"Final Save did not become clickable in review state. diag={final_diag}")"""
 TABLE_SAVE_REPLACEMENT = """        print("   [create_index] Save-gate: waiting for row Save to enable...", flush=True)
         save_clicked = False
         last_diag = {}
@@ -501,6 +638,14 @@ def _load_create_index_func(strategy: str) -> Callable:
         source = source.replace(BASELINE_TABLE_SAVE_BLOCK, TABLE_SAVE_REPLACEMENT, 1)
     else:
         print("[harness] WARN: table save block not found; save-gate patch skipped.", flush=True)
+    if BASELINE_POST_CHUNK_NEXT_BLOCK in source:
+        source = source.replace(BASELINE_POST_CHUNK_NEXT_BLOCK, POST_CHUNK_NEXT_REPLACEMENT, 1)
+    else:
+        print("[harness] WARN: post-chunk Next block not found; step-probe patch skipped.", flush=True)
+    if BASELINE_FINAL_SAVE_LINE in source:
+        source = source.replace(BASELINE_FINAL_SAVE_LINE, FINAL_SAVE_REPLACEMENT, 1)
+    else:
+        print("[harness] WARN: final Save line not found; final save-gate patch skipped.", flush=True)
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as tf:
         tf.write(source)
         temp_path = tf.name
