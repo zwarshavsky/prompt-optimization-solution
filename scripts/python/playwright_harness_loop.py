@@ -595,7 +595,79 @@ SETUP_ONLY_FALLBACK = """            except Exception:
 
 
 STRATEGY_BLOCKS: dict[str, str] = {
-    "baseline": BASELINE_HYBRID_BLOCK,
+    "baseline": """        print("   [create_index] Builder opened. Hybrid + RagFileUDMO... [baseline_resilient]", flush=True)
+        searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
+        try:
+            await searchbox.wait_for(state="visible", timeout=7000)
+            print("   [create_index] searchbox visible without Hybrid click.", flush=True)
+        except Exception:
+            hybrid_candidates = [
+                builder.get_by_role("radio", name=re.compile("hybrid", re.IGNORECASE)).first,
+                builder.get_by_role("button", name=re.compile("hybrid", re.IGNORECASE)).first,
+                builder.get_by_text("Hybrid search", exact=False).first,
+                builder.get_by_text("Hybrid Search", exact=False).first,
+            ]
+            hybrid_clicked = False
+            for cand in hybrid_candidates:
+                try:
+                    if await cand.count() > 0:
+                        await cand.first.wait_for(state="visible", timeout=4000)
+                        await cand.first.click(timeout=6000)
+                        hybrid_clicked = True
+                        break
+                except Exception:
+                    pass
+            if not hybrid_clicked:
+                js_clicked = await builder.evaluate(\"\"\"() => {
+                    const roots = [document];
+                    const seen = new Set([document]);
+                    const stack = [document];
+                    while (stack.length) {
+                        const root = stack.pop();
+                        if (!root || !root.querySelectorAll) continue;
+                        root.querySelectorAll('*').forEach((el) => {
+                            if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+                                seen.add(el.shadowRoot);
+                                roots.push(el.shadowRoot);
+                                stack.push(el.shadowRoot);
+                            }
+                        });
+                    }
+                    const isVisible = (el) => {
+                        const r = el.getBoundingClientRect();
+                        const s = window.getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    const hybridish = [];
+                    for (const r of roots) {
+                        if (!r.querySelectorAll) continue;
+                        r.querySelectorAll('button,[role=\"button\"],[role=\"radio\"],label,span,div').forEach((el) => {
+                            const t = ((el.innerText || el.textContent || '') + '').trim().toLowerCase();
+                            if (t.includes('hybrid')) hybridish.push(el);
+                        });
+                    }
+                    for (const el of hybridish) {
+                        if (!isVisible(el)) continue;
+                        try { el.click(); return true; } catch (_) {}
+                    }
+                    return false;
+                }\"\"\")
+                print(f"   [create_index] hybrid js_click={js_clicked}", flush=True)
+                await asyncio.sleep(0.6)
+            searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
+            broad_search = builder.locator(
+                "input[placeholder*='Search data model objects'], input[placeholder*='Search Data Model Objects'], input[type='search'], [role='searchbox']"
+            ).first
+            try:
+                await searchbox.wait_for(state="visible", timeout=10000)
+                await searchbox.fill("rag")
+            except Exception:
+                await broad_search.wait_for(state="visible", timeout=10000)
+                await broad_search.fill("rag")
+            await asyncio.sleep(0.3)
+        else:
+            await searchbox.fill("rag")
+""",
     "searchbox_first": """        print("   [create_index] Builder opened. Hybrid + RagFileUDMO... [searchbox_first]", flush=True)
         searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
         try:
@@ -727,13 +799,12 @@ def _load_create_index_func(strategy: str) -> Callable:
         if BASELINE_OBJECT_NEW_FALLBACK not in source:
             raise RuntimeError("Could not find object-new fallback block for setup_only_recovery strategy.")
         source = source.replace(BASELINE_OBJECT_NEW_FALLBACK, SETUP_ONLY_FALLBACK, 1)
-    if strategy != "baseline":
-        if BASELINE_HYBRID_BLOCK in source:
-            source = source.replace(BASELINE_HYBRID_BLOCK, replacement, 1)
-        else:
-            # Keep strategy execution alive even if upstream source formatting changed.
-            # This prevents matrix runs from aborting on brittle text replacement.
-            print(f"[harness] WARN: hybrid patch block not found for strategy={strategy}; continuing without hybrid override.", flush=True)
+    if BASELINE_HYBRID_BLOCK in source:
+        source = source.replace(BASELINE_HYBRID_BLOCK, replacement, 1)
+    else:
+        # Keep strategy execution alive even if upstream source formatting changed.
+        # This prevents matrix runs from aborting on brittle text replacement.
+        print(f"[harness] WARN: hybrid patch block not found for strategy={strategy}; continuing without hybrid override.", flush=True)
     if BASELINE_CHUNK_INPUTS_LINE in source:
         source = source.replace(
             BASELINE_CHUNK_INPUTS_LINE,
