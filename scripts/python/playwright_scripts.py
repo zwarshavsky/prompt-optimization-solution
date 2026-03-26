@@ -2474,16 +2474,64 @@ async def _create_search_index_ui(
                     row_selected_via_locator = True
                 except Exception:
                     print("   [create_index] ⚠️ Locator row click failed; attempting Next fallback.", flush=True)
+        async def _click_next_resilient(stage_label: str) -> None:
+            try:
+                await builder.get_by_role("button", name="Next").click(timeout=10000)
+                return
+            except Exception:
+                pass
+            try:
+                await builder.locator("button:has-text('Next'), [role='button']:has-text('Next')").first.click(timeout=8000)
+                return
+            except Exception:
+                pass
+            js_next_clicked = await builder.evaluate("""() => {
+                const roots = [document];
+                const seen = new Set([document]);
+                const stack = [document];
+                while (stack.length) {
+                    const root = stack.pop();
+                    if (!root || !root.querySelectorAll) continue;
+                    root.querySelectorAll('*').forEach((el) => {
+                        if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+                            seen.add(el.shadowRoot);
+                            roots.push(el.shadowRoot);
+                            stack.push(el.shadowRoot);
+                        }
+                    });
+                }
+                const isVisible = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const s = window.getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                };
+                for (const r of roots) {
+                    if (!r.querySelectorAll) continue;
+                    const candidates = r.querySelectorAll("button,[role='button'],lightning-button,lightning-button button");
+                    for (const el of candidates) {
+                        const txt = ((el.innerText || el.textContent || '') + '').trim().toLowerCase();
+                        if (txt !== 'next') continue;
+                        if (!isVisible(el)) continue;
+                        const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+                        if (disabled) continue;
+                        try { el.click(); return true; } catch (_) {}
+                    }
+                }
+                return false;
+            }""")
+            print(f"   [create_index] next js_click({stage_label})={js_next_clicked}", flush=True)
+            if js_next_clicked:
+                return
+            raise RuntimeError(f"Unable to click Next at stage '{stage_label}'")
+
         await asyncio.sleep(0.5)
-        try:
-            await builder.get_by_role("button", name="Next").click(timeout=10000)
-        except Exception:
-            if row_selected_via_js or row_selected_via_locator:
-                raise
+        if row_selected_via_js or row_selected_via_locator:
+            await _click_next_resilient("post-dmo-selection")
+        else:
             # Last-resort: if the UI preselected a default object, Next can still work
             # after a brief render delay.
             await asyncio.sleep(1.0)
-            await builder.get_by_role("button", name="Next").click(timeout=12000)
+            await _click_next_resilient("post-dmo-selection-preselected")
         await asyncio.sleep(1)
         for parser_label in ["LLM-based Parser", "LLM Parser"]:
             loc = builder.get_by_text(parser_label, exact=True)
@@ -2497,9 +2545,9 @@ async def _create_search_index_ui(
         await textarea.wait_for(state="visible", timeout=10000)
         await textarea.fill(parser_prompt)
         # Two Next clicks to reach the chunking configuration step.
-        await builder.get_by_role("button", name="Next").click()
+        await _click_next_resilient("to-chunking-1")
         await asyncio.sleep(3)
-        await builder.get_by_role("button", name="Next").click()
+        await _click_next_resilient("to-chunking-2")
         await asyncio.sleep(3)
 
         pdf_row = builder.locator("tr").filter(has_text="pdf").first
