@@ -458,7 +458,9 @@ def load_runs() -> List[Dict]:
                            results, error, error_details, excel_file_path, 
                            started_at, completed_at, heartbeat_at, checkpoint_info
                     FROM runs
+                    WHERE run_id LIKE 'run_%'
                     ORDER BY started_at DESC
+                    LIMIT 200
                 """)
                 
                 runs = []
