@@ -536,6 +536,9 @@ CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS
             used_js_chunking = True"""
 
 SETUP_URL_CANDIDATES_BLOCK = """        setup_candidates = [
+            f"{base.replace('.my.salesforce.com', '.lightning.force.com')}/lightning/o/DataSemanticSearch/list?filterName=__Recent",
+            f"{base.replace('.my.salesforce.com', '.lightning.force.com')}/lightning/o/DataSemanticSearch/home",
+            f"{base}/lightning/o/DataSemanticSearch/list?filterName=__Recent",
             f"{base}/lightning/o/DataSemanticSearch/home",
             f"{base}/lightning/setup/SetupOneHome/home",
             f"{base}/lightning/setup/SemanticSearch/home",
@@ -551,7 +554,7 @@ SETUP_URL_CANDIDATES_BLOCK = """        setup_candidates = [
                 if "page not found" in t or "not found" in t:
                     print(f"   [create_index] setup candidate not usable: {cand} title={t}", flush=True)
                     continue
-                # If object-home path exposes New, accept it as the entry path immediately.
+                # If object/list path exposes New, accept it as the entry path immediately.
                 if "/lightning/o/datasemanticsearch/home" in cand.lower():
                     new_btn_probe = page.get_by_role("button", name="New")
                     if await new_btn_probe.count() > 0:
@@ -563,6 +566,17 @@ SETUP_URL_CANDIDATES_BLOCK = """        setup_candidates = [
                         print(f"   [create_index] object-home candidate selected (Search Indexes page): {setup_url}", flush=True)
                         break
                     print(f"   [create_index] object-home candidate reached but New not visible: {page.url}", flush=True)
+                if "/lightning/o/datasemanticsearch/list" in cand.lower():
+                    new_btn_probe = page.get_by_role("button", name="New")
+                    if await new_btn_probe.count() > 0:
+                        setup_url = page.url
+                        print(f"   [create_index] object-list candidate selected (New visible): {setup_url}", flush=True)
+                        break
+                    if "search indexes" in t:
+                        setup_url = page.url
+                        print(f"   [create_index] object-list candidate selected (Search Indexes page): {setup_url}", flush=True)
+                        break
+                    print(f"   [create_index] object-list candidate reached but New not visible: {page.url}", flush=True)
                 has_quick_find = await page.get_by_placeholder("Quick Find").count()
                 if has_quick_find == 0:
                     print(f"   [create_index] setup candidate missing Quick Find: {cand} title={t}", flush=True)
