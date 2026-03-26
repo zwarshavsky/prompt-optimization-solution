@@ -139,7 +139,31 @@ POST_CHUNK_NEXT_REPLACEMENT = """        await builder.get_by_role("button", nam
             c3 = await builder.get_by_role("textbox", name="Name").count()
             return (c1 + c2 + c3) > 0
 
-        for adv in range(1, 11):
+        async def _goto_step(step_name):
+            candidates = [
+                builder.get_by_role("link", name=step_name),
+                builder.get_by_text(step_name, exact=False),
+                builder.locator(f"a:has-text('{step_name}')"),
+            ]
+            for cand in candidates:
+                try:
+                    if await cand.count() > 0 and await cand.first.is_visible():
+                        await cand.first.click(timeout=10000)
+                        await asyncio.sleep(0.8)
+                        return True
+                except Exception:
+                    pass
+            return False
+
+        # Deterministic MCP-proven order after chunking:
+        # Vectorization -> Fields for Filtering -> Ranking -> Review and Build.
+        for step_name in ["Vectorization", "Fields for Filtering", "Ranking", "Review and Build"]:
+            if await _name_visible():
+                break
+            jumped = await _goto_step(step_name)
+            print(f"   [create_index] step_jump target={step_name} ok={jumped}", flush=True)
+
+        for adv in range(1, 7):
             if await _name_visible():
                 print(f"   [create_index] Reached naming step at adv={adv}", flush=True)
                 break
@@ -166,21 +190,8 @@ POST_CHUNK_NEXT_REPLACEMENT = """        await builder.get_by_role("button", nam
             print(f"   [create_index] step_probe adv={adv}: {step_probe}", flush=True)
 
         if not await _name_visible():
-            print("   [create_index] Next progression stalled; trying explicit Review and Build jump...", flush=True)
-            jumped = False
-            for review_sel in [
-                builder.get_by_role("link", name="Review and Build"),
-                builder.get_by_text("Review and Build", exact=False),
-                builder.locator("a:has-text('Review and Build')"),
-            ]:
-                try:
-                    if await review_sel.count() > 0 and await review_sel.first.is_visible():
-                        await review_sel.first.click(timeout=10000)
-                        await asyncio.sleep(1.2)
-                        jumped = True
-                        break
-                except Exception:
-                    pass
+            print("   [create_index] Next progression stalled; trying final explicit Review and Build jump...", flush=True)
+            jumped = await _goto_step("Review and Build")
             if jumped and await _name_visible():
                 print("   [create_index] Reached naming step via explicit Review and Build jump.", flush=True)
             else:
@@ -210,6 +221,15 @@ FINAL_SAVE_REPLACEMENT = """        print("   [create_index] Final Save-gate: wa
                         except Exception:
                             pass
                 if final_attempt % 5 == 0:
+                    # Deterministic guided-step nudges aligned with MCP-observed flow.
+                    for forced_step in ["Review and Build", "Ranking", "Review and Build"]:
+                        try:
+                            forced = builder.get_by_text(forced_step, exact=False)
+                            if await forced.count() > 0 and await forced.first.is_visible():
+                                await forced.first.click(timeout=5000)
+                                await asyncio.sleep(0.4)
+                        except Exception:
+                            pass
                     for review_sel in [
                         builder.get_by_role("link", name="Review and Build"),
                         builder.get_by_text("Review and Build", exact=False),
