@@ -602,18 +602,81 @@ STRATEGY_BLOCKS: dict[str, str] = {
             await searchbox.wait_for(state="visible", timeout=7000)
             print("   [create_index] searchbox visible without Hybrid click.", flush=True)
         except Exception:
-            hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
+            # Hybrid entrypoint can render with different controls between LWC variants.
+            # Try role/text first, then a page-context JS fallback, before failing.
+            hybrid_candidates = [
+                builder.get_by_role("radio", name=re.compile("hybrid", re.IGNORECASE)).first,
+                builder.get_by_role("button", name=re.compile("hybrid", re.IGNORECASE)).first,
+                builder.get_by_text("Hybrid search", exact=False).first,
+                builder.get_by_text("Hybrid Search", exact=False).first,
+            ]
+            hybrid_clicked = False
+            for cand in hybrid_candidates:
+                try:
+                    if await cand.count() > 0:
+                        await cand.first.wait_for(state="visible", timeout=4000)
+                        await cand.first.click(timeout=6000)
+                        hybrid_clicked = True
+                        break
+                except Exception:
+                    pass
+            if not hybrid_clicked:
+                js_clicked = await builder.evaluate(\"\"\"() => {
+                    const roots = [document];
+                    const seen = new Set([document]);
+                    const stack = [document];
+                    while (stack.length) {
+                        const root = stack.pop();
+                        if (!root || !root.querySelectorAll) continue;
+                        root.querySelectorAll('*').forEach((el) => {
+                            if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+                                seen.add(el.shadowRoot);
+                                roots.push(el.shadowRoot);
+                                stack.push(el.shadowRoot);
+                            }
+                        });
+                    }
+                    const isVisible = (el) => {
+                        const r = el.getBoundingClientRect();
+                        const s = window.getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    const hybridish = [];
+                    for (const r of roots) {
+                        if (!r.querySelectorAll) continue;
+                        r.querySelectorAll('button,[role=\"button\"],[role=\"radio\"],label,span,div').forEach((el) => {
+                            const t = ((el.innerText || el.textContent || '') + '').trim().toLowerCase();
+                            if (t.includes('hybrid')) hybridish.push(el);
+                        });
+                    }
+                    for (const el of hybridish) {
+                        if (!isVisible(el)) continue;
+                        try { el.click(); return true; } catch (_) {}
+                    }
+                    return false;
+                }\"\"\")
+                print(f"   [create_index] hybrid js_click={js_clicked}", flush=True)
+                await asyncio.sleep(0.6)
+            # Re-resolve searchbox with broader selectors after hybrid attempt.
+            searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
+            broad_search = builder.locator(
+                "input[placeholder*='Search data model objects'], input[placeholder*='Search Data Model Objects'], input[type='search'], [role='searchbox']"
+            ).first
             try:
-                await hybrid_btn.wait_for(state="visible", timeout=12000)
+                await searchbox.wait_for(state="visible", timeout=10000)
+                await searchbox.fill("rag")
             except Exception:
-                snap_path = state_dir / f"{run_id}_searchbox_first_hybrid_missing.png"
-                await builder.screenshot(path=str(snap_path), full_page=True)
-                print(f"   [create_index] DIAG screenshot saved: {snap_path}", flush=True)
-                raise
-            await hybrid_btn.click()
-            await asyncio.sleep(0.5)
-            await searchbox.wait_for(state="visible", timeout=15000)
-        await searchbox.fill("rag")
+                try:
+                    await broad_search.wait_for(state="visible", timeout=10000)
+                    await broad_search.fill("rag")
+                except Exception:
+                    snap_path = state_dir / f"{run_id}_searchbox_first_hybrid_missing.png"
+                    await builder.screenshot(path=str(snap_path), full_page=True)
+                    print(f"   [create_index] DIAG screenshot saved: {snap_path}", flush=True)
+                    raise
+            await asyncio.sleep(0.3)
+        else:
+            await searchbox.fill("rag")
 """,
     "hybrid_role_first": """        print("   [create_index] Builder opened. Hybrid + RagFileUDMO... [hybrid_role_first]", flush=True)
         searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
