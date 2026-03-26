@@ -2356,14 +2356,61 @@ async def _create_search_index_ui(
                 await asyncio.sleep(0.6)
             searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
             broad_search = builder.locator(
-                "input[placeholder*='Search data model objects'], input[placeholder*='Search Data Model Objects'], input[type='search'], [role='searchbox']"
+                "input[placeholder*='Search data model objects']:not([tabindex='-1']), "
+                "input[placeholder*='Search Data Model Objects']:not([tabindex='-1']), "
+                "input[type='search']:not([tabindex='-1']), "
+                "[role='searchbox']:not([tabindex='-1'])"
             ).first
             try:
                 await searchbox.wait_for(state="visible", timeout=10000)
                 await searchbox.fill("rag")
             except Exception:
-                await broad_search.wait_for(state="visible", timeout=10000)
-                await broad_search.fill("rag")
+                try:
+                    await broad_search.wait_for(state="visible", timeout=10000)
+                    await broad_search.fill("rag")
+                except Exception:
+                    # Last-resort: locate a visible searchable input in DOM/shadow DOM and set value via JS.
+                    js_search_filled = await builder.evaluate("""() => {
+                        const roots = [document];
+                        const seen = new Set([document]);
+                        const stack = [document];
+                        while (stack.length) {
+                            const root = stack.pop();
+                            if (!root || !root.querySelectorAll) continue;
+                            root.querySelectorAll('*').forEach((el) => {
+                                if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+                                    seen.add(el.shadowRoot);
+                                    roots.push(el.shadowRoot);
+                                    stack.push(el.shadowRoot);
+                                }
+                            });
+                        }
+                        const isVisible = (el) => {
+                            const r = el.getBoundingClientRect();
+                            const s = window.getComputedStyle(el);
+                            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                        };
+                        for (const r of roots) {
+                            if (!r.querySelectorAll) continue;
+                            const candidates = r.querySelectorAll("input[type='search'], input[placeholder*='Search data model objects'], input[placeholder*='Search Data Model Objects'], [role='searchbox']");
+                            for (const el of candidates) {
+                                const tabindex = (el.getAttribute('tabindex') || '').trim();
+                                if (tabindex === '-1') continue;
+                                if (!isVisible(el)) continue;
+                                try {
+                                    el.focus();
+                                    el.value = 'rag';
+                                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                                    return true;
+                                } catch (_) {}
+                            }
+                        }
+                        return false;
+                    }""")
+                    print(f"   [create_index] js search fill fallback={js_search_filled}", flush=True)
+                    if not js_search_filled:
+                        raise
             await asyncio.sleep(0.3)
         else:
             await searchbox.fill("rag")
