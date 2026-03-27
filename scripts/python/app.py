@@ -451,12 +451,11 @@ def load_runs() -> List[Dict]:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT run_id, status, config, progress, output_lines, 
-                           results, error, error_details, excel_file_path, 
+                    SELECT run_id, status, config, progress, output_lines,
+                           results, error, error_details, excel_file_path,
                            started_at, completed_at, heartbeat_at, checkpoint_info
                     FROM runs
-                    WHERE run_id LIKE 'run_%'
-                    ORDER BY started_at DESC
+                    ORDER BY started_at DESC NULLS LAST
                     LIMIT 200
                 """)
                 
