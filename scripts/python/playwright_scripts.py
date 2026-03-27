@@ -2345,17 +2345,22 @@ async def _create_search_index_ui(
                     await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
                     await asyncio.sleep(1.0)
                     opened_new_flow_direct = True
-                    # DIAGNOSTIC: Take screenshot and log page info
-                    try:
-                        screenshot_path = f"/tmp/searchindex_new_{run_id}.png"
-                        await page.screenshot(path=screenshot_path, full_page=True)
-                        page_title = await page.title()
-                        page_text_sample = await page.evaluate("() => document.body?.innerText.substring(0, 500)")
-                        print(f"   [create_index] 📸 Screenshot: {screenshot_path}", flush=True)
-                        print(f"   [create_index] 📄 Page title: {page_title}", flush=True)
-                        print(f"   [create_index] 📝 Page text (first 500 chars): {page_text_sample}", flush=True)
-                    except Exception as e:
-                        print(f"   [create_index] ⚠️ Diagnostic failed: {e}", flush=True)
+                    # Check if we got redirected to login page again
+                    page_title = await page.title()
+                    if "Login" in page_title or "/login" in page.url.lower():
+                        print(f"   [create_index] ⚠️ Redirected to login on /new URL! Re-authenticating...", flush=True)
+                        # Re-login
+                        username_field = page.get_by_role("textbox", name="Username")
+                        await username_field.wait_for(state="visible", timeout=10000)
+                        await username_field.fill(username)
+                        await page.get_by_role("textbox", name="Password").fill(password)
+                        await page.get_by_role("button", name="Log In").click()
+                        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+                        await asyncio.sleep(2)
+                        # Navigate back to SearchIndex new
+                        await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
+                        await asyncio.sleep(2)
+                        print(f"   [create_index] ✅ Re-authenticated and navigated to SearchIndex /new", flush=True)
         print("   [create_index] New→Advanced Setup→Next (builder popup)...", flush=True)
         print(f"   [create_index] Current page URL before Advanced Setup: {page.url}", flush=True)
         if new_button_clicked:
