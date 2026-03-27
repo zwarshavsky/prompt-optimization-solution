@@ -2426,13 +2426,15 @@ async def _create_search_index_ui(
                         else:
                             print("   [create_index] JS click failed; falling back to direct URL...", flush=True)
                             await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
-                            await asyncio.sleep(3.0)
+                            print("   [create_index] Waiting 30s for wizard LWC to load...", flush=True)
+                            await asyncio.sleep(30.0)
                             opened_new_flow_direct = True
                     except Exception as home_err:
                         print(f"   [create_index] Object home approach failed: {home_err}", flush=True)
                         print("   [create_index] Falling back to direct URL...", flush=True)
                         await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
-                        await asyncio.sleep(3.0)
+                        print("   [create_index] Waiting 30s for wizard LWC to load...", flush=True)
+                        await asyncio.sleep(30.0)
                         opened_new_flow_direct = True
                     # Check if we got redirected to login page again
                     page_title = await page.title()
@@ -2498,8 +2500,8 @@ async def _create_search_index_ui(
         ]
         for cand in advanced_candidates:
             try:
-                if await cand.is_visible(timeout=8000):
-                    await cand.click(timeout=8000)
+                if await cand.is_visible(timeout=30000):
+                    await cand.click(timeout=30000)
                     advanced_clicked = True
                     print("   [create_index] Advanced Setup clicked", flush=True)
                     break
