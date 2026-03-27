@@ -2378,7 +2378,7 @@ async def _create_search_index_ui(
                 else:
                     print("   [create_index] New button not found anywhere; opening SearchIndex new-record URL directly...", flush=True)
                     await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(3.0)
                     opened_new_flow_direct = True
                     # Check if we got redirected to login page again
                     page_title = await page.title()
@@ -2444,7 +2444,7 @@ async def _create_search_index_ui(
         ]
         for cand in advanced_candidates:
             try:
-                if await cand.is_visible(timeout=4000):
+                if await cand.is_visible(timeout=8000):
                     await cand.click(timeout=8000)
                     advanced_clicked = True
                     print("   [create_index] Advanced Setup clicked", flush=True)
