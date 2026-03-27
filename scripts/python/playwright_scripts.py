@@ -2266,26 +2266,64 @@ async def _create_search_index_ui(
                 new_button_clicked = True
                 print("   [create_index] New button clicked at list URL (visible)", flush=True)
             except Exception:
-                # Try JavaScript click even if not "visible" - headless mode visibility detection can be wrong
-                print("   [create_index] 'New' still not visible; trying JavaScript click...", flush=True)
+                # Try comprehensive JavaScript search including shadow DOM
+                print("   [create_index] 'New' still not visible; trying comprehensive JS search...", flush=True)
                 js_new_clicked = await page.evaluate("""() => {
-                    const buttons = Array.from(document.querySelectorAll('button, a'));
-                    const newBtn = buttons.find(btn => {
-                        const text = (btn.textContent || btn.innerText || '').trim();
-                        return text === 'New' && btn.title === 'New';
-                    });
-                    if (newBtn) {
-                        newBtn.click();
-                        return true;
+                    // Search in main DOM and all shadow roots
+                    function findInShadowDOM(root, selector) {
+                        if (!root) return null;
+
+                        // Try direct query
+                        let el = root.querySelector(selector);
+                        if (el) return el;
+
+                        // Recursively search shadow roots
+                        const allElements = root.querySelectorAll('*');
+                        for (const element of allElements) {
+                            if (element.shadowRoot) {
+                                el = findInShadowDOM(element.shadowRoot, selector);
+                                if (el) return el;
+                            }
+                        }
+                        return null;
+                    }
+
+                    // Try multiple selectors
+                    const selectors = [
+                        'button[title="New"]',
+                        'a[title="New"]',
+                        'button:has-text("New")',
+                        'a:has-text("New")'
+                    ];
+
+                    for (const sel of selectors) {
+                        const btn = findInShadowDOM(document, sel);
+                        if (btn) {
+                            btn.scrollIntoView();
+                            btn.click();
+                            return true;
+                        }
+                    }
+
+                    // Fallback: find any button/link with "New" text
+                    const allElements = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+                    for (const el of allElements) {
+                        const text = (el.textContent || el.innerText || '').trim();
+                        const title = el.getAttribute('title') || '';
+                        if ((text === 'New' || title === 'New') && !el.disabled) {
+                            el.scrollIntoView();
+                            el.click();
+                            return true;
+                        }
                     }
                     return false;
                 }""")
                 if js_new_clicked:
                     new_button_clicked = True
-                    print("   [create_index] New button clicked via JavaScript", flush=True)
-                    await asyncio.sleep(1.0)
+                    print("   [create_index] New button clicked via comprehensive JS search", flush=True)
+                    await asyncio.sleep(1.5)
                 else:
-                    print("   [create_index] New button not found; opening SearchIndex new-record URL directly...", flush=True)
+                    print("   [create_index] New button not found anywhere; opening SearchIndex new-record URL directly...", flush=True)
                     await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
                     await asyncio.sleep(1.0)
                     opened_new_flow_direct = True
@@ -2333,6 +2371,14 @@ async def _create_search_index_ui(
                 await asyncio.sleep(0.5)
         if not advanced_clicked:
             print("   [create_index] ⚠️ Advanced Setup control not found; continuing to Next fallback.", flush=True)
+
+        # If we opened via direct URL and didn't find Advanced Setup, we're on wrong page - abort
+        if opened_new_flow_direct and not advanced_clicked:
+            print("   [create_index] ❌ Direct URL navigation failed - no Advanced Setup dialog found", flush=True)
+            print("   [create_index] Page may not have loaded wizard. Aborting to avoid wrong page navigation.", flush=True)
+            await browser.close()
+            return (None, None)
+
         await asyncio.sleep(0.3)
         next_clicked = False
         next_candidates = [
