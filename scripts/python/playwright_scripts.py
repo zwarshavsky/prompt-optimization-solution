@@ -2376,33 +2376,60 @@ async def _create_search_index_ui(
                     print("   [create_index] New button clicked via comprehensive JS search", flush=True)
                     await asyncio.sleep(1.5)
                 else:
-                    print("   [create_index] New button not found anywhere; trying Setup menu path...", flush=True)
-                    # Try Setup → Search Indexes → New
+                    print("   [create_index] New button not found anywhere; trying JS click from object home...", flush=True)
+                    # Navigate to object home and try JS click
                     try:
-                        setup_menu = page.get_by_role("link", name="Setup")
-                        await setup_menu.click()
+                        await page.goto(f"{base}/lightning/o/SearchIndex/home", wait_until="domcontentloaded", timeout=60000)
                         await asyncio.sleep(2.0)
 
-                        # Search for "Search Indexes" in Quick Find
-                        quick_find = page.locator("input[placeholder*='Quick Find']").first
-                        await quick_find.wait_for(state="visible", timeout=10000)
-                        await quick_find.fill("Search Indexes")
-                        await asyncio.sleep(1.0)
+                        # Try to click New via JavaScript, including shadow DOM search
+                        js_new_clicked_home = await page.evaluate("""() => {
+                            function findNewButton(root) {
+                                if (!root) return null;
 
-                        # Click Search Indexes link
-                        search_indexes_link = page.get_by_text("Search Indexes", exact=True).first
-                        await search_indexes_link.click()
-                        await asyncio.sleep(2.0)
+                                // Try standard selectors
+                                let btn = root.querySelector('button[title="New"]');
+                                if (btn && btn.offsetParent) return btn;
 
-                        # Now try New button again
-                        new_btn_setup = page.get_by_role("button", name="New")
-                        await new_btn_setup.wait_for(state="visible", timeout=10000)
-                        await new_btn_setup.click()
-                        new_button_clicked = True
-                        print("   [create_index] New button clicked via Setup menu path", flush=True)
-                        await asyncio.sleep(1.5)
-                    except Exception as setup_err:
-                        print(f"   [create_index] Setup menu path failed: {setup_err}", flush=True)
+                                // Search shadow roots
+                                const elements = root.querySelectorAll('*');
+                                for (const el of elements) {
+                                    if (el.shadowRoot) {
+                                        btn = findNewButton(el.shadowRoot);
+                                        if (btn) return btn;
+                                    }
+                                }
+
+                                // Fallback: any visible button with "New" text
+                                const buttons = root.querySelectorAll('button, a, div[role="button"]');
+                                for (const b of buttons) {
+                                    if (b.offsetParent && ((b.textContent || '').trim() === 'New' || b.getAttribute('title') === 'New')) {
+                                        return b;
+                                    }
+                                }
+                                return null;
+                            }
+
+                            const newBtn = findNewButton(document);
+                            if (newBtn) {
+                                newBtn.scrollIntoView();
+                                newBtn.click();
+                                return true;
+                            }
+                            return false;
+                        }""")
+
+                        if js_new_clicked_home:
+                            new_button_clicked = True
+                            print("   [create_index] New button clicked via JS from object home", flush=True)
+                            await asyncio.sleep(2.0)
+                        else:
+                            print("   [create_index] JS click failed; falling back to direct URL...", flush=True)
+                            await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
+                            await asyncio.sleep(3.0)
+                            opened_new_flow_direct = True
+                    except Exception as home_err:
+                        print(f"   [create_index] Object home approach failed: {home_err}", flush=True)
                         print("   [create_index] Falling back to direct URL...", flush=True)
                         await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
                         await asyncio.sleep(3.0)
