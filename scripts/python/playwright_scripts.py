@@ -2259,6 +2259,7 @@ async def _create_search_index_ui(
                 await asyncio.sleep(1.0)
                 opened_new_flow_direct = True
         print("   [create_index] New→Advanced Setup→Next (builder popup)...", flush=True)
+        print(f"   [create_index] Current page URL before Advanced Setup: {page.url}", flush=True)
         if not opened_new_flow_direct:
             await new_btn.click()
             await asyncio.sleep(0.5)
@@ -2318,6 +2319,8 @@ async def _create_search_index_ui(
             builder = page
         await builder.wait_for_load_state("domcontentloaded")
         await asyncio.sleep(1)
+        builder_url = builder.url
+        print(f"   [create_index] Builder opened at URL: {builder_url}", flush=True)
         print("   [create_index] Builder opened. Hybrid + RagFileUDMO... [baseline_resilient]", flush=True)
         searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
         try:
@@ -2435,7 +2438,10 @@ async def _create_search_index_ui(
                     if not js_search_filled:
                         # Some org variants do not expose a usable searchbox in this step.
                         # Continue and attempt direct row selection below.
-                        print("   [create_index] ⚠️ No usable searchbox found; proceeding with direct DMO row lookup.", flush=True)
+                        page_title = await builder.title()
+                        page_url = builder.url
+                        print(f"   [create_index] ⚠️ No usable searchbox found; proceeding with direct DMO row lookup.", flush=True)
+                        print(f"   [create_index] DIAG: Page title='{page_title}', URL={page_url}", flush=True)
             await asyncio.sleep(0.3)
         else:
             await searchbox.fill("rag")
