@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import sys
 import os
+import tempfile
 from pathlib import Path
 
 # Add current directory to path
@@ -33,34 +34,37 @@ async def run_test_cycle(instance_url: str, username: str, password: str, headle
     def should_abort():
         return False
 
-    # Run the automation
-    try:
-        index_id, full_name = await _create_search_index_ui(
-            username=username,
-            password=password,
-            instance_url=instance_url,
-            index_name=index_name,
-            parser_prompt="Test viewport and networkidle timing improvements.",
-            run_id=f"test_{index_name}",
-            headless=headless,
-            should_abort=should_abort,
-            skip_api_lookup=True
-        )
+    # Create temporary state directory
+    with tempfile.TemporaryDirectory() as temp_state_dir:
+        # Run the automation
+        try:
+            index_id, full_name = await _create_search_index_ui(
+                username=username,
+                password=password,
+                instance_url=instance_url,
+                index_name=index_name,
+                parser_prompt="Test viewport and networkidle timing improvements.",
+                state_dir=temp_state_dir,
+                run_id=f"test_{index_name}",
+                headless=headless,
+                should_abort=should_abort,
+                skip_api_lookup=True
+            )
 
-        if index_id and full_name:
-            print(f"\n✅ SUCCESS: Index created")
-            print(f"   ID: {index_id}")
-            print(f"   Name: {full_name}")
-            return True
-        else:
-            print(f"\n❌ FAILED: Index creation returned None")
+            if index_id and full_name:
+                print(f"\n✅ SUCCESS: Index created")
+                print(f"   ID: {index_id}")
+                print(f"   Name: {full_name}")
+                return True
+            else:
+                print(f"\n❌ FAILED: Index creation returned None")
+                return False
+
+        except Exception as e:
+            print(f"\n❌ ERROR: {e}")
+            import traceback
+            traceback.print_exc()
             return False
-
-    except Exception as e:
-        print(f"\n❌ ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
 
 
 async def main_async(args):
