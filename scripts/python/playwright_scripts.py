@@ -2420,6 +2420,7 @@ async def _create_search_index_ui(
         row_with_dmo = builder.locator("tr,li,div,[role='row']").filter(has_text=re.compile(r"rag\\s*file\\s*udmo|ragfileudmo", re.I))
         row_selected_via_js = False
         row_selected_via_locator = False
+        row_selected_via_keyboard = False
         try:
             await row_with_dmo.first.wait_for(state="visible", timeout=15000)
         except Exception:
@@ -2475,6 +2476,57 @@ async def _create_search_index_ui(
                     row_selected_via_locator = True
                 except Exception:
                     print("   [create_index] ⚠️ Locator row click failed; attempting Next fallback.", flush=True)
+        # In some Salesforce datatable variants, pointer click does not persist selection.
+        # Keyboard activation on a focused row (Enter/Space) is more reliable.
+        if not (row_selected_via_js or row_selected_via_locator):
+            try:
+                await row_with_dmo.first.click(timeout=8000)
+                await asyncio.sleep(0.2)
+                await builder.keyboard.press("Enter")
+                await asyncio.sleep(0.2)
+                await builder.keyboard.press("Space")
+                await asyncio.sleep(0.4)
+                row_selected_via_keyboard = True
+                print("   [create_index] keyboard row selection fallback applied (Enter/Space).", flush=True)
+            except Exception:
+                pass
+
+        dmo_selected_confirmed = await builder.evaluate("""() => {
+            const roots = [document];
+            const seen = new Set([document]);
+            const stack = [document];
+            while (stack.length) {
+                const root = stack.pop();
+                if (!root || !root.querySelectorAll) continue;
+                root.querySelectorAll('*').forEach((el) => {
+                    if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+                        seen.add(el.shadowRoot);
+                        roots.push(el.shadowRoot);
+                        stack.push(el.shadowRoot);
+                    }
+                });
+            }
+            const isRagRow = (el) => {
+                const txt = ((el.innerText || el.textContent || "") + "").toLowerCase();
+                return txt.includes("ragfileudmo") || txt.includes("rag file udmo") || (txt.includes("rag") && txt.includes("udmo"));
+            };
+            for (const r of roots) {
+                if (!r.querySelectorAll) continue;
+                const rows = r.querySelectorAll("tr,li,div,[role='row']");
+                for (const row of rows) {
+                    if (!isRagRow(row)) continue;
+                    const ariaSelected = row.getAttribute("aria-selected") === "true";
+                    const checkedInside = row.querySelector("input[type='radio']:checked, [role='radio'][aria-checked='true']");
+                    if (ariaSelected || checkedInside) return true;
+                }
+            }
+            return false;
+        }""")
+        print(
+            f"   [create_index] dmo selection confirmed={dmo_selected_confirmed} "
+            f"(js={row_selected_via_js}, locator={row_selected_via_locator}, keyboard={row_selected_via_keyboard})",
+            flush=True,
+        )
         async def _click_next_resilient(stage_label: str) -> None:
             try:
                 await builder.get_by_role("button", name="Next").click(timeout=10000)
@@ -2527,7 +2579,7 @@ async def _create_search_index_ui(
 
         await asyncio.sleep(0.5)
         try:
-            if row_selected_via_js or row_selected_via_locator:
+            if row_selected_via_js or row_selected_via_locator or row_selected_via_keyboard or dmo_selected_confirmed:
                 await _click_next_resilient("post-dmo-selection")
             else:
                 # Last-resort: if the UI preselected a default object, Next can still work
