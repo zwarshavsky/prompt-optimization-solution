@@ -2288,12 +2288,10 @@ async def _create_search_index_ui(
                         return null;
                     }
 
-                    // Try multiple selectors
+                    // Try multiple selectors (only valid CSS selectors for querySelector)
                     const selectors = [
                         'button[title="New"]',
-                        'a[title="New"]',
-                        'button:has-text("New")',
-                        'a:has-text("New")'
+                        'a[title="New"]'
                     ];
 
                     for (const sel of selectors) {
