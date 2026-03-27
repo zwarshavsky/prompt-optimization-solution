@@ -2244,26 +2244,59 @@ async def _create_search_index_ui(
         print("   [create_index] Waiting for New button...", flush=True)
         new_btn = page.get_by_role("button", name="New")
         opened_new_flow_direct = False
+        new_button_clicked = False
         try:
             await new_btn.wait_for(state="visible", timeout=12000)
+            await new_btn.click()
+            new_button_clicked = True
+            print("   [create_index] New button clicked (visible)", flush=True)
         except Exception:
             print("   [create_index] 'New' not visible on current page; trying SearchIndex list fallback URL...", flush=True)
             # Fallback: go straight to the SearchIndex object list view where "New" is rendered.
             await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2.0)
+            # Wait for network idle to ensure page fully loaded
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
             try:
                 await new_btn.wait_for(state="visible", timeout=12000)
+                await new_btn.click()
+                new_button_clicked = True
+                print("   [create_index] New button clicked at list URL (visible)", flush=True)
             except Exception:
-                print("   [create_index] 'New' still not visible; opening SearchIndex new-record URL directly...", flush=True)
-                await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
-                await asyncio.sleep(1.0)
-                opened_new_flow_direct = True
+                # Try JavaScript click even if not "visible" - headless mode visibility detection can be wrong
+                print("   [create_index] 'New' still not visible; trying JavaScript click...", flush=True)
+                js_new_clicked = await page.evaluate("""() => {
+                    const buttons = Array.from(document.querySelectorAll('button, a'));
+                    const newBtn = buttons.find(btn => {
+                        const text = (btn.textContent || btn.innerText || '').trim();
+                        return text === 'New' && btn.title === 'New';
+                    });
+                    if (newBtn) {
+                        newBtn.click();
+                        return true;
+                    }
+                    return false;
+                }""")
+                if js_new_clicked:
+                    new_button_clicked = True
+                    print("   [create_index] New button clicked via JavaScript", flush=True)
+                    await asyncio.sleep(1.0)
+                else:
+                    print("   [create_index] New button not found; opening SearchIndex new-record URL directly...", flush=True)
+                    await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
+                    await asyncio.sleep(1.0)
+                    opened_new_flow_direct = True
         print("   [create_index] New→Advanced Setup→Next (builder popup)...", flush=True)
         print(f"   [create_index] Current page URL before Advanced Setup: {page.url}", flush=True)
-        if not opened_new_flow_direct:
-            await new_btn.click()
+        if new_button_clicked:
             await asyncio.sleep(0.5)
         advanced_clicked = False
+        if new_button_clicked:
+            # Give the dialog time to appear after clicking New
+            await asyncio.sleep(1.0)
         advanced_candidates = [
             page.get_by_text("Advanced Setup", exact=True),
             page.get_by_text("Advanced setup", exact=True),
@@ -2273,12 +2306,31 @@ async def _create_search_index_ui(
         ]
         for cand in advanced_candidates:
             try:
-                if await cand.is_visible(timeout=2500):
+                if await cand.is_visible(timeout=4000):
                     await cand.click(timeout=8000)
                     advanced_clicked = True
+                    print("   [create_index] Advanced Setup clicked", flush=True)
                     break
             except Exception:
                 pass
+        if not advanced_clicked and new_button_clicked:
+            # Try JavaScript click for Advanced Setup
+            js_advanced_clicked = await page.evaluate("""() => {
+                const elements = Array.from(document.querySelectorAll('button, a, span, div'));
+                const advBtn = elements.find(el => {
+                    const text = (el.textContent || el.innerText || '').trim();
+                    return text.toLowerCase().includes('advanced') && text.toLowerCase().includes('setup');
+                });
+                if (advBtn) {
+                    advBtn.click();
+                    return true;
+                }
+                return false;
+            }""")
+            if js_advanced_clicked:
+                advanced_clicked = True
+                print("   [create_index] Advanced Setup clicked via JavaScript", flush=True)
+                await asyncio.sleep(0.5)
         if not advanced_clicked:
             print("   [create_index] ⚠️ Advanced Setup control not found; continuing to Next fallback.", flush=True)
         await asyncio.sleep(0.3)
