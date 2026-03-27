@@ -15,15 +15,16 @@ script_dir = Path(__file__).resolve().parent
 if str(script_dir) not in sys.path:
     sys.path.insert(0, str(script_dir))
 
+from datetime import datetime
 from playwright_scripts import _create_search_index_ui
-from salesforce_api import get_next_index_name
 
 
 async def run_test_cycle(instance_url: str, username: str, password: str, headless: bool):
     """Run a single test cycle of Search Index creation"""
 
-    # Get next index name
-    index_name = get_next_index_name(instance_url, username, password, prefix="Test_Viewport")
+    # Generate unique index name with timestamp
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    index_name = f"Test_Viewport_{timestamp}"
     print(f"\n🧪 Testing Search Index creation: {index_name}")
     print(f"   Instance: {instance_url}")
     print(f"   Headless: {headless}")
