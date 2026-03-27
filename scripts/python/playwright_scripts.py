@@ -2283,6 +2283,26 @@ async def _create_search_index_ui(
                 except Exception as nav_err:
                     print(f"   [create_index] ⚠️ Navigation timeout or error: {nav_err}", flush=True)
                     print(f"   [create_index] Current page: {await page.title()} at {page.url}", flush=True)
+
+                # Check if login actually succeeded
+                await asyncio.sleep(1)
+                current_title = await page.title()
+                current_url = page.url
+                if "Login" in current_title or "/login" in current_url.lower():
+                    print(f"   [create_index] ❌ Login FAILED - still on login page after submission", flush=True)
+                    print(f"   [create_index] Title: {current_title}, URL: {current_url}", flush=True)
+                    print(f"   [create_index] Possible causes: Wrong credentials (SF_PASSWORD), CAPTCHA, MFA required, or account locked", flush=True)
+                    # Take screenshot for debugging
+                    try:
+                        screenshot_path = f"/tmp/login_failed_{run_id}.png"
+                        await page.screenshot(path=screenshot_path, full_page=True)
+                        print(f"   [create_index] 📸 Login failure screenshot: {screenshot_path}", flush=True)
+                    except Exception:
+                        pass
+                    await browser.close()
+                    return (None, None)
+
+                print(f"   [create_index] ✅ Login succeeded! Now on: {current_title}", flush=True)
                 # Now navigate to SearchIndex list
                 await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="networkidle", timeout=60000)
                 await asyncio.sleep(5.0)
@@ -2392,6 +2412,26 @@ async def _create_search_index_ui(
                         except Exception as nav_err:
                             print(f"   [create_index] ⚠️ Navigation timeout or error: {nav_err}", flush=True)
                             print(f"   [create_index] Current page: {await page.title()} at {page.url}", flush=True)
+
+                        # Check if login actually succeeded
+                        await asyncio.sleep(1)
+                        current_title_after_login = await page.title()
+                        current_url_after_login = page.url
+                        if "Login" in current_title_after_login or "/login" in current_url_after_login.lower():
+                            print(f"   [create_index] ❌ Login FAILED - still on login page after submission", flush=True)
+                            print(f"   [create_index] Title: {current_title_after_login}, URL: {current_url_after_login}", flush=True)
+                            print(f"   [create_index] Possible causes: Wrong credentials (SF_PASSWORD), CAPTCHA, MFA required, or account locked", flush=True)
+                            # Take screenshot for debugging
+                            try:
+                                screenshot_path = f"/tmp/login_failed_new_{run_id}.png"
+                                await page.screenshot(path=screenshot_path, full_page=True)
+                                print(f"   [create_index] 📸 Login failure screenshot: {screenshot_path}", flush=True)
+                            except Exception:
+                                pass
+                            await browser.close()
+                            return (None, None)
+
+                        print(f"   [create_index] ✅ Login succeeded! Now on: {current_title_after_login}", flush=True)
                         # Navigate back to SearchIndex new
                         await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
                         await asyncio.sleep(2)
