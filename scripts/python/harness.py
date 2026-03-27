@@ -15,7 +15,7 @@ script_dir = Path(__file__).resolve().parent
 if str(script_dir) not in sys.path:
     sys.path.insert(0, str(script_dir))
 
-from playwright_scripts import create_search_index_via_playwright
+from playwright_scripts import _create_search_index_ui
 from salesforce_api import get_next_index_name
 
 
@@ -34,10 +34,10 @@ async def run_test_cycle(instance_url: str, username: str, password: str, headle
 
     # Run the automation
     try:
-        index_id, full_name = await create_search_index_via_playwright(
-            instance_url=instance_url,
+        index_id, full_name = await _create_search_index_ui(
             username=username,
             password=password,
+            instance_url=instance_url,
             index_name=index_name,
             parser_prompt="Test viewport and networkidle timing improvements.",
             run_id=f"test_{index_name}",
