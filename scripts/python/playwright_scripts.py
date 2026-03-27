@@ -2141,7 +2141,7 @@ async def _create_search_index_ui(
             print(f"   [create_index] ⚠️ Could not decode SF_AUTH_STATE_B64: {e}", flush=True)
             storage_state = None
 
-        context = await browser.new_context(viewport={"width": 1280, "height": 720}, storage_state=storage_state)
+        context = await browser.new_context(viewport={"width": 1400, "height": 900}, storage_state=storage_state)
         page = await context.new_page()
         if should_abort():
             print("   ⚠️ DIAG: Abort at start (before login)", flush=True)
@@ -2253,8 +2253,8 @@ async def _create_search_index_ui(
         except Exception:
             print("   [create_index] 'New' not visible on current page; trying SearchIndex list fallback URL...", flush=True)
             # Fallback: go straight to the SearchIndex object list view where "New" is rendered.
-            await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(2.0)
+            await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="networkidle", timeout=60000)
+            await asyncio.sleep(5.0)
             # Wait for network idle to ensure page fully loaded
             try:
                 await page.wait_for_load_state("networkidle", timeout=10000)
