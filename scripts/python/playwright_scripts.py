@@ -2472,9 +2472,40 @@ async def _create_search_index_ui(
         if not advanced_clicked:
             print("   [create_index] ⚠️ Advanced Setup control not found; continuing to Next fallback.", flush=True)
 
-        # If we opened via direct URL and didn't find Advanced Setup, we're on wrong page - abort
+        # If we opened via direct URL and didn't find Advanced Setup, diagnose what's on page
         if opened_new_flow_direct and not advanced_clicked:
             print("   [create_index] ❌ Direct URL navigation failed - no Advanced Setup dialog found", flush=True)
+
+            # DIAGNOSTICS: Capture page state
+            page_title = await page.title()
+            page_url = page.url
+            print(f"   [create_index] 📊 DIAGNOSTICS:", flush=True)
+            print(f"   [create_index]    Title: {page_title}", flush=True)
+            print(f"   [create_index]    URL: {page_url}", flush=True)
+
+            # Get visible buttons/elements
+            try:
+                visible_elements = await page.evaluate("""() => {
+                    const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+                    return buttons.slice(0, 30).map(el => ({
+                        tag: el.tagName,
+                        text: (el.textContent || '').trim().substring(0, 60),
+                        title: el.getAttribute('title'),
+                        visible: el.offsetParent !== null
+                    })).filter(el => el.visible || el.title);
+                }""")
+                print(f"   [create_index]    Visible elements: {visible_elements[:10]}", flush=True)
+            except Exception as e:
+                print(f"   [create_index]    Could not get elements: {e}", flush=True)
+
+            # Take screenshot
+            try:
+                screenshot_path = f"/tmp/no_advanced_setup_{run_id}.png"
+                await page.screenshot(path=screenshot_path, full_page=True)
+                print(f"   [create_index]    📸 Screenshot: {screenshot_path}", flush=True)
+            except Exception as e:
+                print(f"   [create_index]    Screenshot failed: {e}", flush=True)
+
             print("   [create_index] Page may not have loaded wizard. Aborting to avoid wrong page navigation.", flush=True)
             await browser.close()
             return (None, None)
