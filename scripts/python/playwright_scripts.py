@@ -2260,25 +2260,26 @@ async def _create_search_index_ui(
                 await page.wait_for_load_state("networkidle", timeout=10000)
             except Exception:
                 pass
-            # DIAGNOSTIC: Take screenshot and log page info
-            try:
-                screenshot_path = f"/tmp/searchindex_list_{run_id}.png"
-                await page.screenshot(path=screenshot_path, full_page=True)
-                page_title = await page.title()
-                visible_buttons = await page.evaluate("""() => {
-                    const buttons = Array.from(document.querySelectorAll('button, a'));
-                    return buttons.slice(0, 20).map(b => ({
-                        tag: b.tagName,
-                        text: b.textContent?.trim().substring(0, 50),
-                        title: b.getAttribute('title'),
-                        visible: b.offsetParent !== null
-                    }));
-                }""")
-                print(f"   [create_index] 📸 Screenshot: {screenshot_path}", flush=True)
-                print(f"   [create_index] 📄 Page title: {page_title}", flush=True)
-                print(f"   [create_index] 🔘 First 20 buttons: {visible_buttons}", flush=True)
-            except Exception as e:
-                print(f"   [create_index] ⚠️ Diagnostic failed: {e}", flush=True)
+            # Check if we got redirected to login page (session expired)
+            page_title = await page.title()
+            if "Login" in page_title or "/login" in page.url.lower():
+                print(f"   [create_index] ⚠️ Redirected to login page! Session expired. Re-authenticating...", flush=True)
+                # Re-login
+                username_field = page.get_by_role("textbox", name="Username")
+                await username_field.wait_for(state="visible", timeout=10000)
+                await username_field.fill(username)
+                await page.get_by_role("textbox", name="Password").fill(password)
+                await page.get_by_role("button", name="Log In").click()
+                await page.wait_for_load_state("domcontentloaded", timeout=60000)
+                await asyncio.sleep(2)
+                # Navigate back to SearchIndex list
+                await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="networkidle", timeout=60000)
+                await asyncio.sleep(5.0)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                print(f"   [create_index] ✅ Re-authenticated and navigated to SearchIndex list", flush=True)
             try:
                 await new_btn.wait_for(state="visible", timeout=12000)
                 await new_btn.click()
