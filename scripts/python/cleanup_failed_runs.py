@@ -39,22 +39,25 @@ def cleanup_failed_runs(days_old=7, dry_run=True):
             # Count what will be deleted
             cur.execute("""
                 SELECT COUNT(*),
-                       SUM(pg_column_size(output_log)) as log_size,
-                       SUM(pg_column_size(progress)) as progress_size
+                       SUM(pg_column_size(output_lines)) as log_size,
+                       SUM(pg_column_size(progress)) as progress_size,
+                       SUM(pg_column_size(results)) as results_size
                 FROM runs
                 WHERE status IN ('failed', 'error')
                 AND started_at < %s
             """, (cutoff_date,))
 
-            count, log_size, progress_size = cur.fetchone()
+            count, log_size, progress_size, results_size = cur.fetchone()
             log_size_mb = (log_size or 0) / 1024 / 1024
             progress_size_mb = (progress_size or 0) / 1024 / 1024
-            total_mb = log_size_mb + progress_size_mb
+            results_size_mb = (results_size or 0) / 1024 / 1024
+            total_mb = log_size_mb + progress_size_mb + results_size_mb
 
             print(f"\n{'DRY RUN - ' if dry_run else ''}Found {count} failed/error runs older than {days_old} days")
             print(f"Estimated space to free: {total_mb:.2f} MB")
             print(f"  - Logs: {log_size_mb:.2f} MB")
             print(f"  - Progress data: {progress_size_mb:.2f} MB")
+            print(f"  - Results data: {results_size_mb:.2f} MB")
 
             if count == 0:
                 print("Nothing to clean up!")
