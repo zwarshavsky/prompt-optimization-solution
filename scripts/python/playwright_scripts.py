@@ -2279,7 +2279,20 @@ async def _create_search_index_ui(
                     await page.wait_for_load_state("networkidle", timeout=10000)
                 except Exception:
                     pass
-                print(f"   [create_index] ✅ Re-authenticated and navigated to SearchIndex list", flush=True)
+                # Log page state after re-auth
+                page_title_after = await page.title()
+                visible_buttons_after = await page.evaluate("""() => {
+                    const buttons = Array.from(document.querySelectorAll('button, a'));
+                    return buttons.slice(0, 30).map(b => ({
+                        tag: b.tagName,
+                        text: b.textContent?.trim().substring(0, 50),
+                        title: b.getAttribute('title'),
+                        name: b.getAttribute('name'),
+                        visible: b.offsetParent !== null
+                    })).filter(b => b.visible || b.title || b.text);
+                }""")
+                print(f"   [create_index] ✅ Re-authenticated. Page: {page_title_after}", flush=True)
+                print(f"   [create_index] 🔘 Visible elements after re-auth: {visible_buttons_after}", flush=True)
             try:
                 await new_btn.wait_for(state="visible", timeout=12000)
                 await new_btn.click()
