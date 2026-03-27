@@ -2268,20 +2268,21 @@ async def _create_search_index_ui(
                 username_field = page.get_by_role("textbox", name="Username")
                 await username_field.wait_for(state="visible", timeout=10000)
                 await username_field.fill(username)
-                await page.get_by_role("textbox", name="Password").fill(password)
-                await page.get_by_role("button", name="Log In").click()
-                # Wait for login to COMPLETE - page must navigate away from login
-                print(f"   [create_index] 🔄 Waiting for login to complete...", flush=True)
-                for attempt in range(10):
-                    await asyncio.sleep(2)
-                    current_title = await page.title()
-                    current_url = page.url
-                    if "Login" not in current_title and "/login" not in current_url.lower():
-                        print(f"   [create_index] ✅ Login completed. Now on: {current_title}", flush=True)
-                        break
-                    print(f"   [create_index] ⏳ Still on login page (attempt {attempt+1}/10)...", flush=True)
-                else:
-                    print(f"   [create_index] ⚠️ Login may not have completed after 20s", flush=True)
+                password_field = page.get_by_role("textbox", name="Password")
+                await password_field.fill(password)
+                # Wait a moment for form validation
+                await asyncio.sleep(0.5)
+                login_button = page.get_by_role("button", name="Log In")
+                await login_button.wait_for(state="visible", timeout=5000)
+                print(f"   [create_index] 🔑 Clicking Login button and waiting for navigation...", flush=True)
+                # Click and wait for navigation to complete
+                try:
+                    async with page.expect_navigation(timeout=30000):
+                        await login_button.click()
+                    print(f"   [create_index] ✅ Login navigation completed", flush=True)
+                except Exception as nav_err:
+                    print(f"   [create_index] ⚠️ Navigation timeout or error: {nav_err}", flush=True)
+                    print(f"   [create_index] Current page: {await page.title()} at {page.url}", flush=True)
                 # Now navigate to SearchIndex list
                 await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="networkidle", timeout=60000)
                 await asyncio.sleep(5.0)
@@ -2376,10 +2377,21 @@ async def _create_search_index_ui(
                         username_field = page.get_by_role("textbox", name="Username")
                         await username_field.wait_for(state="visible", timeout=10000)
                         await username_field.fill(username)
-                        await page.get_by_role("textbox", name="Password").fill(password)
-                        await page.get_by_role("button", name="Log In").click()
-                        await page.wait_for_load_state("domcontentloaded", timeout=60000)
-                        await asyncio.sleep(2)
+                        password_field = page.get_by_role("textbox", name="Password")
+                        await password_field.fill(password)
+                        # Wait a moment for form validation
+                        await asyncio.sleep(0.5)
+                        login_button = page.get_by_role("button", name="Log In")
+                        await login_button.wait_for(state="visible", timeout=5000)
+                        print(f"   [create_index] 🔑 Clicking Login button and waiting for navigation...", flush=True)
+                        # Click and wait for navigation to complete
+                        try:
+                            async with page.expect_navigation(timeout=30000):
+                                await login_button.click()
+                            print(f"   [create_index] ✅ Login navigation completed", flush=True)
+                        except Exception as nav_err:
+                            print(f"   [create_index] ⚠️ Navigation timeout or error: {nav_err}", flush=True)
+                            print(f"   [create_index] Current page: {await page.title()} at {page.url}", flush=True)
                         # Navigate back to SearchIndex new
                         await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
                         await asyncio.sleep(2)
