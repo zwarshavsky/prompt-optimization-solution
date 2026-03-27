@@ -299,9 +299,21 @@ async def update_search_index_prompt(
     
     async with async_playwright() as p:
         # Launch browser with visible window - normal size
+        launch_args = {}
+        if headless:
+            # Required args for headless Chromium on Heroku/Linux containers
+            launch_args['args'] = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--disable-extensions'
+            ]
         browser = await p.chromium.launch(
             headless=headless,
-            slow_mo=slow_mo  # Delay between actions in milliseconds (0 = no delay)
+            slow_mo=slow_mo,  # Delay between actions in milliseconds (0 = no delay)
+            **launch_args
         )
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 720}  # Normal resolution
@@ -2105,7 +2117,18 @@ async def _create_search_index_ui(
     base = instance_url.rstrip("/")
     login_url = "https://login.salesforce.com" if "salesforce.com" in base else base
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless, slow_mo=100)
+        launch_args = {'slow_mo': 100}
+        if headless:
+            # Required args for headless Chromium on Heroku/Linux containers
+            launch_args['args'] = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--disable-extensions'
+            ]
+        browser = await p.chromium.launch(headless=headless, **launch_args)
         # Optional browser session bootstrap from env (captured Playwright storageState).
         # Useful for Heroku/headless runs where interactive login isn't possible each run.
         storage_state = None
@@ -2476,20 +2499,57 @@ async def _create_search_index_ui(
                     row_selected_via_locator = True
                 except Exception:
                     print("   [create_index] ⚠️ Locator row click failed; attempting Next fallback.", flush=True)
-        # In some Salesforce datatable variants, pointer click does not persist selection.
-        # Keyboard activation on a focused row (Enter/Space) is more reliable.
+        # In some Salesforce datatable variants, Playwright locator click cannot focus/select the row.
+        # Use a JS fallback that traverses shadow roots and performs focus + keyboard activation in-page.
         if not (row_selected_via_js or row_selected_via_locator):
-            try:
-                await row_with_dmo.first.click(timeout=8000)
-                await asyncio.sleep(0.2)
-                await builder.keyboard.press("Enter")
-                await asyncio.sleep(0.2)
-                await builder.keyboard.press("Space")
-                await asyncio.sleep(0.4)
-                row_selected_via_keyboard = True
-                print("   [create_index] keyboard row selection fallback applied (Enter/Space).", flush=True)
-            except Exception:
-                pass
+            row_selected_via_keyboard = await builder.evaluate("""() => {
+                const roots = [document];
+                const seen = new Set([document]);
+                const stack = [document];
+                while (stack.length) {
+                    const root = stack.pop();
+                    if (!root || !root.querySelectorAll) continue;
+                    root.querySelectorAll('*').forEach((el) => {
+                        if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+                            seen.add(el.shadowRoot);
+                            roots.push(el.shadowRoot);
+                            stack.push(el.shadowRoot);
+                        }
+                    });
+                }
+                const isVisible = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const s = window.getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                };
+                const isRagRow = (el) => {
+                    const txt = ((el.innerText || el.textContent || "") + "").toLowerCase();
+                    return txt.includes("ragfileudmo") || txt.includes("rag file udmo") || (txt.includes("rag") && txt.includes("udmo"));
+                };
+                const press = (target, key) => {
+                    try {
+                        target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+                        target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true }));
+                    } catch (_) {}
+                };
+                for (const r of roots) {
+                    if (!r.querySelectorAll) continue;
+                    const rows = r.querySelectorAll("tr,li,div,[role='row']");
+                    for (const row of rows) {
+                        if (!isRagRow(row) || !isVisible(row)) continue;
+                        const clickable = row.querySelector("input[type='radio'], [role='radio'], label, .slds-radio__label") || row;
+                        try { clickable.click(); } catch (_) {}
+                        try { row.focus(); } catch (_) {}
+                        press(row, 'Enter');
+                        press(row, ' ');
+                        const checkedInside = row.querySelector("input[type='radio']:checked, [role='radio'][aria-checked='true']");
+                        const ariaSelected = row.getAttribute("aria-selected") === "true";
+                        if (checkedInside || ariaSelected) return true;
+                    }
+                }
+                return false;
+            }""")
+            print(f"   [create_index] js keyboard row selection fallback={row_selected_via_keyboard}", flush=True)
 
         dmo_selected_confirmed = await builder.evaluate("""() => {
             const roots = [document];
@@ -2518,6 +2578,15 @@ async def _create_search_index_ui(
                     const ariaSelected = row.getAttribute("aria-selected") === "true";
                     const checkedInside = row.querySelector("input[type='radio']:checked, [role='radio'][aria-checked='true']");
                     if (ariaSelected || checkedInside) return true;
+                }
+                // Some variants render radio controls outside strict row semantics.
+                const checked = r.querySelectorAll("input[type='radio']:checked, [role='radio'][aria-checked='true']");
+                for (const c of checked) {
+                    const host = c.closest("tr,li,div,[role='row']") || c.parentElement;
+                    const txt = ((host?.innerText || host?.textContent || c.innerText || c.textContent || "") + "").toLowerCase();
+                    if (txt.includes("ragfileudmo") || txt.includes("rag file udmo") || (txt.includes("rag") && txt.includes("udmo"))) {
+                        return true;
+                    }
                 }
             }
             return false;
@@ -2826,7 +2895,18 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
         return False
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless, slow_mo=100)
+        launch_args = {'slow_mo': 100}
+        if headless:
+            # Required args for headless Chromium on Heroku/Linux containers
+            launch_args['args'] = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--disable-extensions'
+            ]
+        browser = await p.chromium.launch(headless=headless, **launch_args)
         storage_state = None
         try:
             auth_b64 = os.getenv("SF_AUTH_STATE_B64", "").strip()
