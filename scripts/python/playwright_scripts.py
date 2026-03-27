@@ -2157,7 +2157,7 @@ async def _create_search_index_ui(
             print(f"   [create_index] ✅ Session restore worked. URL: {current_url}", flush=True)
         else:
             print("   [create_index] Logging in...", flush=True)
-            await page.goto(login_url, wait_until="networkidle", timeout=60000)
+            await page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
             await page.get_by_role("textbox", name="Username").fill(username)
             await page.get_by_role("textbox", name="Password").fill(password)
             await page.get_by_role("button", name="Log In").click()
@@ -2253,13 +2253,8 @@ async def _create_search_index_ui(
         except Exception:
             print("   [create_index] 'New' not visible on current page; trying SearchIndex list fallback URL...", flush=True)
             # Fallback: go straight to the SearchIndex object list view where "New" is rendered.
-            await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="networkidle", timeout=60000)
-            await asyncio.sleep(5.0)
-            # Wait for network idle to ensure page fully loaded
-            try:
-                await page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
+            await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(3.0)
             # Check if we got redirected to login page (session expired)
             page_title = await page.title()
             if "Login" in page_title or "/login" in page.url.lower():
@@ -2304,12 +2299,8 @@ async def _create_search_index_ui(
 
                 print(f"   [create_index] ✅ Login succeeded! Now on: {current_title}", flush=True)
                 # Now navigate to SearchIndex list
-                await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="networkidle", timeout=60000)
-                await asyncio.sleep(5.0)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=10000)
-                except Exception:
-                    pass
+                await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="domcontentloaded", timeout=60000)
+                await asyncio.sleep(3.0)
                 # Log page state after re-auth
                 page_title_after = await page.title()
                 visible_buttons_after = await page.evaluate("""() => {
