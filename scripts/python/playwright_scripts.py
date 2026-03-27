@@ -2270,9 +2270,19 @@ async def _create_search_index_ui(
                 await username_field.fill(username)
                 await page.get_by_role("textbox", name="Password").fill(password)
                 await page.get_by_role("button", name="Log In").click()
-                await page.wait_for_load_state("domcontentloaded", timeout=60000)
-                await asyncio.sleep(2)
-                # Navigate back to SearchIndex list
+                # Wait for login to COMPLETE - page must navigate away from login
+                print(f"   [create_index] 🔄 Waiting for login to complete...", flush=True)
+                for attempt in range(10):
+                    await asyncio.sleep(2)
+                    current_title = await page.title()
+                    current_url = page.url
+                    if "Login" not in current_title and "/login" not in current_url.lower():
+                        print(f"   [create_index] ✅ Login completed. Now on: {current_title}", flush=True)
+                        break
+                    print(f"   [create_index] ⏳ Still on login page (attempt {attempt+1}/10)...", flush=True)
+                else:
+                    print(f"   [create_index] ⚠️ Login may not have completed after 20s", flush=True)
+                # Now navigate to SearchIndex list
                 await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="networkidle", timeout=60000)
                 await asyncio.sleep(5.0)
                 try:
