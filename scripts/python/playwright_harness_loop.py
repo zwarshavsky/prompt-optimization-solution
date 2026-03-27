@@ -535,9 +535,29 @@ CHUNK_ERROR_REPLACEMENT = """            print("   [create_index] Strategy 6: JS
                 raise RuntimeError(f"Chunking inputs not found after 6 strategies. pdf_row text='{pdf_row_text}' js={js_chunk}")
             used_js_chunking = True"""
 
-SETUP_URL_CANDIDATES_BLOCK = """        setup_candidates = [
-            f"{base.replace('.my.salesforce.com', '.lightning.force.com')}/lightning/o/DataSemanticSearch/list?filterName=__Recent",
-            f"{base.replace('.my.salesforce.com', '.lightning.force.com')}/lightning/o/DataSemanticSearch/home",
+SETUP_URL_CANDIDATES_BLOCK = """        lightning_base = base.replace('.my.salesforce.com', '.lightning.force.com')
+        # Force a frontdoor handoff so Lightning gets an authenticated app-context session.
+        if access_token:
+            frontdoor_candidates = [
+                f"{lightning_base}/secur/frontdoor.jsp?sid={access_token}&retURL=%2Flightning%2Fo%2FDataSemanticSearch%2Flist%3FfilterName%3D__Recent",
+                f"{base}/secur/frontdoor.jsp?sid={access_token}&retURL=%2Flightning%2Fo%2FDataSemanticSearch%2Flist%3FfilterName%3D__Recent",
+            ]
+            for fdc in frontdoor_candidates:
+                try:
+                    await page.goto(fdc, wait_until="domcontentloaded", timeout=60000)
+                    await asyncio.sleep(1.0)
+                    fd_url = page.url
+                    new_btn_probe = page.get_by_role("button", name="New")
+                    if await new_btn_probe.count() > 0:
+                        print(f"   [create_index] frontdoor selected (New visible): {fd_url}", flush=True)
+                        break
+                    print(f"   [create_index] frontdoor landed without New: {fd_url}", flush=True)
+                except Exception as e:
+                    print(f"   [create_index] frontdoor candidate failed: {fdc} err={e}", flush=True)
+
+        setup_candidates = [
+            f"{lightning_base}/lightning/o/DataSemanticSearch/list?filterName=__Recent",
+            f"{lightning_base}/lightning/o/DataSemanticSearch/home",
             f"{base}/lightning/o/DataSemanticSearch/list?filterName=__Recent",
             f"{base}/lightning/o/DataSemanticSearch/home",
             f"{base}/lightning/setup/SetupOneHome/home",

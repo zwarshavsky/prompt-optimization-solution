@@ -299,21 +299,9 @@ async def update_search_index_prompt(
     
     async with async_playwright() as p:
         # Launch browser with visible window - normal size
-        launch_args = {}
-        if headless:
-            # Required args for headless Chromium on Heroku/Linux containers
-            launch_args['args'] = [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--disable-extensions'
-            ]
         browser = await p.chromium.launch(
             headless=headless,
-            slow_mo=slow_mo,  # Delay between actions in milliseconds (0 = no delay)
-            **launch_args
+            slow_mo=slow_mo  # Delay between actions in milliseconds (0 = no delay)
         )
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 720}  # Normal resolution
@@ -2117,18 +2105,7 @@ async def _create_search_index_ui(
     base = instance_url.rstrip("/")
     login_url = "https://login.salesforce.com" if "salesforce.com" in base else base
     async with async_playwright() as p:
-        launch_args = {'slow_mo': 100}
-        if headless:
-            # Required args for headless Chromium on Heroku/Linux containers
-            launch_args['args'] = [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--disable-extensions'
-            ]
-        browser = await p.chromium.launch(headless=headless, **launch_args)
+        browser = await p.chromium.launch(headless=headless, slow_mo=100)
         # Optional browser session bootstrap from env (captured Playwright storageState).
         # Useful for Heroku/headless runs where interactive login isn't possible each run.
         storage_state = None
@@ -2179,48 +2156,6 @@ async def _create_search_index_ui(
             print(f"   ❌ Login did not reach authenticated URL. Current URL: {current_url}", flush=True)
             await browser.close()
             return (None, None)
-        lightning_base = base.replace(".my.salesforce.com", ".lightning.force.com")
-
-        # Force an authenticated Lightning app-context handoff when possible.
-        # This mitigates session restore landing on non-app login contexts.
-        if access_token:
-            frontdoor_candidates = [
-                f"{lightning_base}/secur/frontdoor.jsp?sid={access_token}&retURL=%2Flightning%2Fo%2FDataSemanticSearch%2Flist%3FfilterName%3D__Recent",
-                f"{base}/secur/frontdoor.jsp?sid={access_token}&retURL=%2Flightning%2Fo%2FDataSemanticSearch%2Flist%3FfilterName%3D__Recent",
-            ]
-            for fdc in frontdoor_candidates:
-                try:
-                    await page.goto(fdc, wait_until="domcontentloaded", timeout=60000)
-                    await asyncio.sleep(1.0)
-                    fd_url = page.url
-                    new_btn_probe = page.get_by_role("button", name="New")
-                    if await new_btn_probe.count() > 0:
-                        print(f"   [create_index] frontdoor selected (New visible): {fd_url}", flush=True)
-                        break
-                    print(f"   [create_index] frontdoor landed without New: {fd_url}", flush=True)
-                except Exception as e:
-                    print(f"   [create_index] frontdoor candidate failed: {fdc} err={e}", flush=True)
-
-        # Prefer object-list candidates where New button is rendered deterministically.
-        setup_candidates = [
-            f"{lightning_base}/lightning/o/DataSemanticSearch/list?filterName=__Recent",
-            f"{lightning_base}/lightning/o/DataSemanticSearch/home",
-            f"{base}/lightning/o/DataSemanticSearch/list?filterName=__Recent",
-            f"{base}/lightning/o/DataSemanticSearch/home",
-            setup_url,
-        ]
-        for cand in setup_candidates:
-            try:
-                await page.goto(cand, wait_until="domcontentloaded", timeout=60000)
-                await asyncio.sleep(1.0)
-                cur = page.url
-                new_btn_probe = page.get_by_role("button", name="New")
-                if await new_btn_probe.count() > 0:
-                    print(f"   [create_index] object-list candidate selected (New visible): {cur}", flush=True)
-                    break
-            except Exception:
-                continue
-
         if should_abort():
             print("   ⚠️ DIAG: Abort after login, before Search Indexes", flush=True)
             await browser.close()
@@ -2318,372 +2253,22 @@ async def _create_search_index_ui(
             builder = page
         await builder.wait_for_load_state("domcontentloaded")
         await asyncio.sleep(1)
-        print("   [create_index] Builder opened. Hybrid + RagFileUDMO... [baseline_resilient]", flush=True)
-        searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
-        try:
-            await searchbox.wait_for(state="visible", timeout=7000)
-            print("   [create_index] searchbox visible without Hybrid click.", flush=True)
-        except Exception:
-            hybrid_candidates = [
-                builder.get_by_role("radio", name=re.compile("hybrid", re.IGNORECASE)).first,
-                builder.get_by_role("button", name=re.compile("hybrid", re.IGNORECASE)).first,
-                builder.get_by_text("Hybrid search", exact=False).first,
-                builder.get_by_text("Hybrid Search", exact=False).first,
-            ]
-            hybrid_clicked = False
-            for cand in hybrid_candidates:
-                try:
-                    if await cand.count() > 0:
-                        await cand.first.wait_for(state="visible", timeout=4000)
-                        await cand.first.click(timeout=6000)
-                        hybrid_clicked = True
-                        break
-                except Exception:
-                    pass
-            if not hybrid_clicked:
-                js_clicked = await builder.evaluate("""() => {
-                    const roots = [document];
-                    const seen = new Set([document]);
-                    const stack = [document];
-                    while (stack.length) {
-                        const root = stack.pop();
-                        if (!root || !root.querySelectorAll) continue;
-                        root.querySelectorAll('*').forEach((el) => {
-                            if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-                                seen.add(el.shadowRoot);
-                                roots.push(el.shadowRoot);
-                                stack.push(el.shadowRoot);
-                            }
-                        });
-                    }
-                    const isVisible = (el) => {
-                        const r = el.getBoundingClientRect();
-                        const s = window.getComputedStyle(el);
-                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-                    };
-                    const hybridish = [];
-                    for (const r of roots) {
-                        if (!r.querySelectorAll) continue;
-                        r.querySelectorAll('button,[role="button"],[role="radio"],label,span,div').forEach((el) => {
-                            const t = ((el.innerText || el.textContent || '') + '').trim().toLowerCase();
-                            if (t.includes('hybrid')) hybridish.push(el);
-                        });
-                    }
-                    for (const el of hybridish) {
-                        if (!isVisible(el)) continue;
-                        try { el.click(); return true; } catch (_) {}
-                    }
-                    return false;
-                }""")
-                print(f"   [create_index] hybrid js_click={js_clicked}", flush=True)
-                await asyncio.sleep(0.6)
-            searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
-            broad_search = builder.locator(
-                "input[placeholder*='Search data model objects']:not([tabindex='-1']), "
-                "input[placeholder*='Search Data Model Objects']:not([tabindex='-1']), "
-                "input[type='search']:not([tabindex='-1']), "
-                "[role='searchbox']:not([tabindex='-1'])"
-            ).first
-            try:
-                await searchbox.wait_for(state="visible", timeout=10000)
-                await searchbox.fill("rag")
-            except Exception:
-                try:
-                    await broad_search.wait_for(state="visible", timeout=10000)
-                    await broad_search.fill("rag")
-                except Exception:
-                    # Last-resort: locate a visible searchable input in DOM/shadow DOM and set value via JS.
-                    js_search_filled = await builder.evaluate("""() => {
-                        const roots = [document];
-                        const seen = new Set([document]);
-                        const stack = [document];
-                        while (stack.length) {
-                            const root = stack.pop();
-                            if (!root || !root.querySelectorAll) continue;
-                            root.querySelectorAll('*').forEach((el) => {
-                                if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-                                    seen.add(el.shadowRoot);
-                                    roots.push(el.shadowRoot);
-                                    stack.push(el.shadowRoot);
-                                }
-                            });
-                        }
-                        const isVisible = (el) => {
-                            const r = el.getBoundingClientRect();
-                            const s = window.getComputedStyle(el);
-                            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-                        };
-                        for (const r of roots) {
-                            if (!r.querySelectorAll) continue;
-                            const candidates = r.querySelectorAll("input[type='search'], input[placeholder*='Search data model objects'], input[placeholder*='Search Data Model Objects'], [role='searchbox']");
-                            for (const el of candidates) {
-                                const tabindex = (el.getAttribute('tabindex') || '').trim();
-                                if (tabindex === '-1') continue;
-                                if (!isVisible(el)) continue;
-                                try {
-                                    el.focus();
-                                    el.value = 'rag';
-                                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                                    return true;
-                                } catch (_) {}
-                            }
-                        }
-                        return false;
-                    }""")
-                    print(f"   [create_index] js search fill fallback={js_search_filled}", flush=True)
-                    if not js_search_filled:
-                        # Some org variants do not expose a usable searchbox in this step.
-                        # Continue and attempt direct row selection below.
-                        print("   [create_index] ⚠️ No usable searchbox found; proceeding with direct DMO row lookup.", flush=True)
-            await asyncio.sleep(0.3)
-        else:
-            await searchbox.fill("rag")
-        await asyncio.sleep(2.5)
-        row_with_dmo = builder.locator("tr,li,div,[role='row']").filter(has_text=re.compile(r"rag\\s*file\\s*udmo|ragfileudmo", re.I))
-        row_selected_via_js = False
-        row_selected_via_locator = False
-        row_selected_via_keyboard = False
-        try:
-            await row_with_dmo.first.wait_for(state="visible", timeout=15000)
-        except Exception:
-            # Fallback for variants that render rows in non-table containers or shadow roots.
-            js_row_clicked = await builder.evaluate("""() => {
-                const roots = [document];
-                const seen = new Set([document]);
-                const stack = [document];
-                while (stack.length) {
-                    const root = stack.pop();
-                    if (!root || !root.querySelectorAll) continue;
-                    root.querySelectorAll('*').forEach((el) => {
-                        if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-                            seen.add(el.shadowRoot);
-                            roots.push(el.shadowRoot);
-                            stack.push(el.shadowRoot);
-                        }
-                    });
-                }
-                const isVisible = (el) => {
-                    const r = el.getBoundingClientRect();
-                    const s = window.getComputedStyle(el);
-                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-                };
-                for (const r of roots) {
-                    if (!r.querySelectorAll) continue;
-                    const candidates = r.querySelectorAll("tr,li,div,[role='row']");
-                    for (const el of candidates) {
-                        const txt = ((el.innerText || el.textContent || "") + "").toLowerCase();
-                        if (!(txt.includes("ragfileudmo") || txt.includes("rag file udmo") || (txt.includes("rag") && txt.includes("udmo")))) continue;
-                        if (!isVisible(el)) continue;
-                        const radio = el.querySelector("input[type='radio'], [role='radio'], label, .slds-radio__label");
-                        try {
-                            (radio || el).click();
-                            return true;
-                        } catch (_) {}
-                    }
-                }
-                return false;
-            }""")
-            print(f"   [create_index] js row select fallback={js_row_clicked}", flush=True)
-            if not js_row_clicked:
-                print("   [create_index] ⚠️ RagFileUDMO row not directly selectable; attempting locator row/radio selection next.", flush=True)
-            # IMPORTANT: only treat JS row selection as successful when it actually clicked.
-            row_selected_via_js = bool(js_row_clicked)
-        if not row_selected_via_js:
-            try:
-                await row_with_dmo.locator("label.slds-radio__label, .slds-radio__label").first.click(timeout=12000)
-                # CRITICAL: Wait for Lightning to process the selection (headless mode needs extra time)
-                await asyncio.sleep(1.5)
-                row_selected_via_locator = True
-            except Exception:
-                try:
-                    await row_with_dmo.locator("input[type='radio'], [role='radio']").first.click(force=True, timeout=8000)
-                    # CRITICAL: Wait for Lightning to process the selection (headless mode needs extra time)
-                    await asyncio.sleep(1.5)
-                    row_selected_via_locator = True
-                except Exception:
-                    print("   [create_index] ⚠️ Locator row click failed; attempting Next fallback.", flush=True)
-        # In some Salesforce datatable variants, Playwright locator click cannot focus/select the row.
-        # Use a JS fallback that traverses shadow roots and performs focus + keyboard activation in-page.
-        if not (row_selected_via_js or row_selected_via_locator):
-            row_selected_via_keyboard = await builder.evaluate("""() => {
-                const roots = [document];
-                const seen = new Set([document]);
-                const stack = [document];
-                while (stack.length) {
-                    const root = stack.pop();
-                    if (!root || !root.querySelectorAll) continue;
-                    root.querySelectorAll('*').forEach((el) => {
-                        if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-                            seen.add(el.shadowRoot);
-                            roots.push(el.shadowRoot);
-                            stack.push(el.shadowRoot);
-                        }
-                    });
-                }
-                const isVisible = (el) => {
-                    const r = el.getBoundingClientRect();
-                    const s = window.getComputedStyle(el);
-                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-                };
-                const isRagRow = (el) => {
-                    const txt = ((el.innerText || el.textContent || "") + "").toLowerCase();
-                    return txt.includes("ragfileudmo") || txt.includes("rag file udmo") || (txt.includes("rag") && txt.includes("udmo"));
-                };
-                const press = (target, key) => {
-                    try {
-                        target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
-                        target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true }));
-                    } catch (_) {}
-                };
-                for (const r of roots) {
-                    if (!r.querySelectorAll) continue;
-                    const rows = r.querySelectorAll("tr,li,div,[role='row']");
-                    for (const row of rows) {
-                        if (!isRagRow(row) || !isVisible(row)) continue;
-                        const clickable = row.querySelector("input[type='radio'], [role='radio'], label, .slds-radio__label") || row;
-                        try { clickable.click(); } catch (_) {}
-                        try { row.focus(); } catch (_) {}
-                        press(row, 'Enter');
-                        press(row, ' ');
-                        const checkedInside = row.querySelector("input[type='radio']:checked, [role='radio'][aria-checked='true']");
-                        const ariaSelected = row.getAttribute("aria-selected") === "true";
-                        if (checkedInside || ariaSelected) return true;
-                    }
-                }
-                return false;
-            }""")
-            print(f"   [create_index] js keyboard row selection fallback={row_selected_via_keyboard}", flush=True)
-
-        # CRITICAL: Give Lightning extra time to process selection in headless mode, then verify
-        # Retry verification up to 3 times with delays (Lightning may need time to update DOM)
-        dmo_selected_confirmed = False
-        for verify_attempt in range(3):
-            if verify_attempt > 0:
-                await asyncio.sleep(1.0)  # Wait before retry
-            dmo_selected_confirmed = await builder.evaluate("""() => {
-            const roots = [document];
-            const seen = new Set([document]);
-            const stack = [document];
-            while (stack.length) {
-                const root = stack.pop();
-                if (!root || !root.querySelectorAll) continue;
-                root.querySelectorAll('*').forEach((el) => {
-                    if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-                        seen.add(el.shadowRoot);
-                        roots.push(el.shadowRoot);
-                        stack.push(el.shadowRoot);
-                    }
-                });
-            }
-            const isRagRow = (el) => {
-                const txt = ((el.innerText || el.textContent || "") + "").toLowerCase();
-                return txt.includes("ragfileudmo") || txt.includes("rag file udmo") || (txt.includes("rag") && txt.includes("udmo"));
-            };
-            for (const r of roots) {
-                if (!r.querySelectorAll) continue;
-                const rows = r.querySelectorAll("tr,li,div,[role='row']");
-                for (const row of rows) {
-                    if (!isRagRow(row)) continue;
-                    const ariaSelected = row.getAttribute("aria-selected") === "true";
-                    const checkedInside = row.querySelector("input[type='radio']:checked, [role='radio'][aria-checked='true']");
-                    if (ariaSelected || checkedInside) return true;
-                }
-                // Some variants render radio controls outside strict row semantics.
-                const checked = r.querySelectorAll("input[type='radio']:checked, [role='radio'][aria-checked='true']");
-                for (const c of checked) {
-                    const host = c.closest("tr,li,div,[role='row']") || c.parentElement;
-                    const txt = ((host?.innerText || host?.textContent || c.innerText || c.textContent || "") + "").toLowerCase();
-                    if (txt.includes("ragfileudmo") || txt.includes("rag file udmo") || (txt.includes("rag") && txt.includes("udmo"))) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }""")
-            if dmo_selected_confirmed:
-                print(f"   [create_index] ✅ DMO selection verified after {verify_attempt + 1} attempt(s)", flush=True)
-                break
-            elif verify_attempt < 2:
-                print(f"   [create_index] ⚠️  DMO not confirmed yet, retrying verification (attempt {verify_attempt + 2}/3)...", flush=True)
-
-        print(
-            f"   [create_index] dmo selection confirmed={dmo_selected_confirmed} "
-            f"(js={row_selected_via_js}, locator={row_selected_via_locator}, keyboard={row_selected_via_keyboard})",
-            flush=True,
-        )
-        async def _click_next_resilient(stage_label: str) -> None:
-            try:
-                await builder.get_by_role("button", name="Next").click(timeout=10000)
-                return
-            except Exception:
-                pass
-            try:
-                await builder.locator("button:has-text('Next'), [role='button']:has-text('Next')").first.click(timeout=8000)
-                return
-            except Exception:
-                pass
-            js_next_clicked = await builder.evaluate("""() => {
-                const roots = [document];
-                const seen = new Set([document]);
-                const stack = [document];
-                while (stack.length) {
-                    const root = stack.pop();
-                    if (!root || !root.querySelectorAll) continue;
-                    root.querySelectorAll('*').forEach((el) => {
-                        if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-                            seen.add(el.shadowRoot);
-                            roots.push(el.shadowRoot);
-                            stack.push(el.shadowRoot);
-                        }
-                    });
-                }
-                const isVisible = (el) => {
-                    const r = el.getBoundingClientRect();
-                    const s = window.getComputedStyle(el);
-                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-                };
-                for (const r of roots) {
-                    if (!r.querySelectorAll) continue;
-                    const candidates = r.querySelectorAll("button,[role='button'],lightning-button,lightning-button button");
-                    for (const el of candidates) {
-                        const txt = ((el.innerText || el.textContent || '') + '').trim().toLowerCase();
-                        if (txt !== 'next') continue;
-                        if (!isVisible(el)) continue;
-                        const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
-                        if (disabled) continue;
-                        try { el.click(); return true; } catch (_) {}
-                    }
-                }
-                return false;
-            }""")
-            print(f"   [create_index] next js_click({stage_label})={js_next_clicked}", flush=True)
-            if js_next_clicked:
-                return
-            raise RuntimeError(f"Unable to click Next at stage '{stage_label}'")
-
+        print("   [create_index] Builder opened. Hybrid + RagFileUDMO...", flush=True)
+        hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
+        await hybrid_btn.wait_for(state="visible", timeout=15000)
+        await hybrid_btn.click()
         await asyncio.sleep(0.5)
+        searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
+        await searchbox.wait_for(state="visible", timeout=15000)
+        await searchbox.fill("rag")
+        await asyncio.sleep(2.5)
+        row_with_dmo = builder.locator("tr").filter(has_text="RagFileUDMO")
         try:
-            if row_selected_via_js or row_selected_via_locator or row_selected_via_keyboard or dmo_selected_confirmed:
-                await _click_next_resilient("post-dmo-selection")
-            else:
-                # Last-resort: if the UI preselected a default object, Next can still work
-                # after a brief render delay.
-                await asyncio.sleep(1.0)
-                await _click_next_resilient("post-dmo-selection-preselected")
-        except Exception as next_err:
-            # Some UI variants auto-advance to parser step without exposing a clickable Next.
-            parser_step_visible = False
-            for parser_label in ["LLM-based Parser", "LLM Parser"]:
-                try:
-                    if await builder.get_by_text(parser_label, exact=True).first.is_visible():
-                        parser_step_visible = True
-                        break
-                except Exception:
-                    pass
-            if not parser_step_visible:
-                raise next_err
-            print("   [create_index] ⚠️ Next unavailable but parser step already visible; continuing.", flush=True)
+            await row_with_dmo.locator("label.slds-radio__label, .slds-radio__label").first.click(timeout=12000)
+        except Exception:
+            await row_with_dmo.locator("input[type='radio']").first.click(force=True, timeout=8000)
+        await asyncio.sleep(0.5)
+        await builder.get_by_role("button", name="Next").click()
         await asyncio.sleep(1)
         for parser_label in ["LLM-based Parser", "LLM Parser"]:
             loc = builder.get_by_text(parser_label, exact=True)
@@ -2697,9 +2282,9 @@ async def _create_search_index_ui(
         await textarea.wait_for(state="visible", timeout=10000)
         await textarea.fill(parser_prompt)
         # Two Next clicks to reach the chunking configuration step.
-        await _click_next_resilient("to-chunking-1")
+        await builder.get_by_role("button", name="Next").click()
         await asyncio.sleep(3)
-        await _click_next_resilient("to-chunking-2")
+        await builder.get_by_role("button", name="Next").click()
         await asyncio.sleep(3)
 
         pdf_row = builder.locator("tr").filter(has_text="pdf").first
@@ -2911,28 +2496,8 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
         return False
 
     async with async_playwright() as p:
-        launch_args = {'slow_mo': 100}
-        if headless:
-            # Required args for headless Chromium on Heroku/Linux containers
-            launch_args['args'] = [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--disable-extensions'
-            ]
-        browser = await p.chromium.launch(headless=headless, **launch_args)
-        storage_state = None
-        try:
-            auth_b64 = os.getenv("SF_AUTH_STATE_B64", "").strip()
-            if auth_b64:
-                storage_state = json.loads(base64.b64decode(auth_b64).decode("utf-8"))
-                print("   [create_retriever] Found SF_AUTH_STATE_B64, attempting session restore...", flush=True)
-        except Exception as e:
-            print(f"   [create_retriever] ⚠️ Could not decode SF_AUTH_STATE_B64: {e}", flush=True)
-            storage_state = None
-        context = await browser.new_context(viewport={"width": 1280, "height": 720}, storage_state=storage_state)
+        browser = await p.chromium.launch(headless=headless, slow_mo=100)
+        context = await browser.new_context(viewport={"width": 1280, "height": 720})
         page = await context.new_page()
         if should_abort():
             await browser.close()
@@ -3282,7 +2847,7 @@ async def run_new_index_pipeline(
     """
     from salesforce_api import (
         get_salesforce_credentials, get_next_index_name, poll_index_until_ready,
-        poll_retriever_until_activated, update_genai_prompt_with_retriever, find_index_id_by_name,
+        poll_retriever_until_activated, update_genai_prompt_with_retriever,
     )
 
     def should_abort():
@@ -3315,22 +2880,6 @@ async def run_new_index_pipeline(
             except Exception:
                 pass
         raise
-
-    # UI save can beat API list consistency; recover by name lookup before failing step 1.
-    if not index_id and full_index_name and not should_abort():
-        print(f"   [create_index] index_id missing after UI save; retrying lookup by name: {full_index_name}", flush=True)
-        try:
-            index_id = find_index_id_by_name(
-                instance_url=instance_url,
-                access_token=access_token,
-                index_name=full_index_name,
-                max_attempts=6,
-                retry_delay_seconds=5,
-            )
-            if index_id:
-                print(f"   [create_index] recovered index_id via name lookup: {index_id}", flush=True)
-        except Exception as lookup_err:
-            print(f"   [create_index] lookup-by-name recovery failed: {lookup_err}", flush=True)
 
     if not index_id or should_abort():
         if should_abort():
