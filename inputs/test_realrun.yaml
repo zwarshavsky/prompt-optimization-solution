@@ -21,7 +21,7 @@ configuration:
   headless: true
   slowMo: 0
   geminiModel: "gemini-3-pro-preview"
-  pdfDirectory: "/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/prompt-optimization-solution/inputs/pdf/RiteHite"
+  pdfDirectory: "/app/inputs/pdf_test"
 
   promptTemplateApiName: "RiteHite_Default_Parser_Test"
   promptInputs:
