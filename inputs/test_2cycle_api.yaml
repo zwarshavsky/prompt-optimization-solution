@@ -1,0 +1,74 @@
+# Test configuration for 2-cycle API provisioning validation
+# This runs a minimal test with 2 cycles to verify the new API-based index creation works end-to-end
+#
+# Usage: python3 scripts/python/main.py --yaml-input inputs/test_2cycle_api.yaml --full-workflow
+
+configuration:
+  # Salesforce login credentials
+  salesforce:
+    username: "zwarshavsky.c462cab15a@salesforce.com"
+    password: "salesforce1"
+    instanceUrl: "https://storm-c014d4ce2ba7f4.my.salesforce.com"
+
+  # Run-specific Excel filename prefix
+  projectName: "API_Test_2Cycles"
+
+  # Playwright settings (headless for faster execution)
+  takeScreenshots: false
+  headless: true
+  slowMo: 0
+
+  # Gemini Model Configuration
+  geminiModel: "gemini-2.5-pro"
+
+  # PDF Directory (local runs only)
+  pdfDirectory: "/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/prompt-optimization-solution/inputs/pdf/RiteHite"
+
+  # Prompt Template API Name
+  promptTemplateApiName: "Test_RAG_Optimization_SFR_v1"
+
+  # Search Index ID (Cycle 1 baseline)
+  searchIndexId: "18lHu000000CgpDIAS"
+
+  # Index Prefix for new indexes (REQUIRED for API provisioning)
+  indexPrefix: "ApiTest2C"
+
+  # Refinement stage
+  refinementStage: "llm_parser"
+
+  # Cycle limits (2 cycles for quick test)
+  maxCycles: 2
+  minCycles: 1
+
+  # Stage-specific configuration
+  refinementStages:
+    llm_parser:
+      description: "LLM Parser Prompt Optimization"
+      focus: |
+        **CRITICAL**: Optimize the LLM Parser Prompt. This test focuses on verifying API-based index creation works correctly.
+      rootCauseGuidance: |
+        **ROOT CAUSE ANALYSIS** (simplified for test):
+        1. Compare generated vs expected answer
+        2. Identify parser failure points
+        3. Note specific missing information
+        4. Reference PDF location
+      modificationGuidance: |
+        **PROMPT MODIFICATIONS** (simplified for test):
+        1. Provide specific prompt text changes
+        2. Link to identified root causes
+        3. Keep modifications minimal and targeted
+        4. Provide complete updated prompt at end
+
+# Test questions (minimal set from actual test set)
+questions:
+  - number: "Q1"
+    text: "How many Siemens 400A breakers can I fit in a distribution section?"
+    expectedAnswer: "You can fit up to 8 Siemens 400A breakers in a standard distribution section."
+
+  - number: "Q2"
+    text: "How tall is a Siemens 800a?"
+    expectedAnswer: "A Siemens 5x CDP rated 800A is 78\" tall."
+
+  - number: "Q3"
+    text: "What is the standard lug size for a 3va41?"
+    expectedAnswer: "The standard lug size for a Siemens 3VA41 breaker is: 15-40A: (1) #14-8 AWG (lug kit 3VA91330JB10), 45-125A: (1) #8-3/0 AWG (lug kit 3VA91330JB11)"

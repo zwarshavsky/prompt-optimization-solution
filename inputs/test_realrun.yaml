@@ -18,8 +18,8 @@ configuration:
   projectName: "RiteHite Troubleshooting Agent"
 
   takeScreenshots: false
-  headless: true
-  slowMo: 0
+  headless: false
+  slowMo: 1000
   geminiModel: "gemini-2.5-pro"
   pdfDirectory: "/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/prompt-optimization-solution/inputs/pdf/RiteHite"
 

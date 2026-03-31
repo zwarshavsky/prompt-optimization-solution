@@ -3297,37 +3297,105 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
         await search_combobox.click()
         await asyncio.sleep(2)
 
-        # Wait for options to appear
-        await popup.locator('[role="option"]').first.wait_for(state="visible", timeout=10000)
+        # Wait for options to exist in DOM (don't check visibility - LWC marks them hidden)
+        await popup.locator('[role="option"]').first.wait_for(state="attached", timeout=10000)
+        await asyncio.sleep(1)  # Let dropdown fully render
+
         option_count = await popup.locator('[role="option"]').count()
         print(f"   ↳ Dropdown has {option_count} options", flush=True)
 
-        # Find the option by searching through Lightning Web Component structure
-        # LWC options have the text in nested spans - use textContent to get it
-        found = False
-        options = await popup.locator('[role="option"]').all()
-        for i, opt in enumerate(options):
-            try:
-                # Get all text content from nested elements
-                text = await opt.evaluate("el => el.textContent")
-                if text and index_name in text:
-                    print(f"   ✅ Found index at option {i}: '{text.strip()}'", flush=True)
-                    await opt.click()
-                    found = True
-                    break
-            except Exception as e:
-                print(f"   ⚠️  Error checking option {i}: {e}", flush=True)
-                continue
+        # Find and click using JavaScript that handles Shadow DOM
+        found = await popup.evaluate("""
+            (indexName) => {
+                // Function to get all text from element including shadow DOM
+                function getAllText(element) {
+                    let text = '';
+                    // Get direct text nodes
+                    for (const node of element.childNodes) {
+                        if (node.nodeType === Node.TEXT_NODE) {
+                            text += node.textContent;
+                        }
+                    }
+                    // Traverse shadow DOM
+                    if (element.shadowRoot) {
+                        text += getAllText(element.shadowRoot);
+                    }
+                    // Traverse children
+                    for (const child of element.children) {
+                        text += getAllText(child);
+                    }
+                    return text;
+                }
+
+                const options = document.querySelectorAll('[role="option"]');
+                console.log(`DEBUG: Found ${options.length} options total`);
+
+                // Debug: show first 20 options
+                for (let i = 0; i < Math.min(20, options.length); i++) {
+                    const text = getAllText(options[i]);
+                    console.log(`DEBUG: Option ${i}: "${text.trim()}" (length: ${text.length})`);
+                }
+
+                // Search for target index
+                for (let i = 0; i < options.length; i++) {
+                    const text = getAllText(options[i]);
+                    if (text && text.includes(indexName)) {
+                        console.log(`✅ Found index at option ${i}: ${text.trim()}`);
+                        options[i].click();
+                        return true;
+                    }
+                }
+                return false;
+            }
+        """, index_name)
+
+        if found:
+            print(f"   ✅ Found and clicked index '{index_name}'", flush=True)
+        else:
+            # Fallback: try Playwright locator with shadow DOM traversal
+            print(f"   ⚠️  JavaScript click failed, trying locator with shadow DOM...", flush=True)
+            options = await popup.locator('[role="option"]').all()
+            get_shadow_text_js = """
+                (element) => {
+                    function getAllText(el) {
+                        let text = '';
+                        for (const node of el.childNodes) {
+                            if (node.nodeType === 3) text += node.textContent;
+                        }
+                        if (el.shadowRoot) {
+                            for (const child of el.shadowRoot.querySelectorAll('*')) {
+                                text += getAllText(child);
+                            }
+                        }
+                        for (const child of el.children) {
+                            text += getAllText(child);
+                        }
+                        return text;
+                    }
+                    return getAllText(element);
+                }
+            """
+            for i, opt in enumerate(options):
+                try:
+                    text = await opt.evaluate(get_shadow_text_js)
+                    if text and index_name in text:
+                        print(f"   ✅ Found index at option {i}: '{text.strip()}'", flush=True)
+                        await opt.click()
+                        found = True
+                        break
+                except Exception as e:
+                    print(f"   ⚠️  Error checking option {i}: {e}", flush=True)
+                    continue
 
         if not found:
-            # Debug: show what we found
-            print(f"   ❌ Index '{index_name}' not found. Available options:", flush=True)
-            for i, opt in enumerate(options[:10]):
+            # Debug: show what we found with shadow DOM
+            print(f"   ❌ Index '{index_name}' not found. Showing first 20 options:", flush=True)
+            for i, opt in enumerate(options[:20]):
                 try:
-                    text = await opt.evaluate("el => el.textContent")
-                    print(f"      [{i}] '{text.strip() if text else '(empty)'}'", flush=True)
-                except:
-                    print(f"      [{i}] <error>", flush=True)
+                    text = await opt.evaluate(get_shadow_text_js)
+                    print(f"      [{i}] '{text.strip() if text else '(empty)'}' (length: {len(text)})", flush=True)
+                except Exception as e:
+                    print(f"      [{i}] <error: {e}>", flush=True)
             raise Exception(f"Index '{index_name}' not found in dropdown")
         await asyncio.sleep(0.3)
         await popup.get_by_role("button", name="Next").click()
@@ -3730,9 +3798,17 @@ async def run_new_index_pipeline(
     # SUBSTEP 1c: Create Retriever
     if substep == 'index_ready':
         print(f"   Creating Retriever...", flush=True)
+
+        # Fetch index label for dropdown selection (dropdown shows label, not developer name)
+        from salesforce_api import SearchIndexAPI
+        idx_api = SearchIndexAPI(instance_url, access_token)
+        index_details = idx_api.get_index(index_id)
+        index_label = index_details.get('label', full_index_name)
+        print(f"   ↳ Index label for dropdown: {index_label}", flush=True)
+
         try:
             retriever_display_name, _ = await _create_retriever_ui(
-                username, password, instance_url, full_index_name, state_dir, run_id, headless, should_abort
+                username, password, instance_url, index_label, state_dir, run_id, headless, should_abort
             )
         except Exception as e:
             print(f"   ❌ Create retriever failed: {e}", flush=True)
