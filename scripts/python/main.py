@@ -187,16 +187,26 @@ def release_prompt_template_lock(prompt_template_api_name):
 def save_state(cycle_number, last_completed_step, sheet_name, refinement_stage,
                stage_status=None, proposed_llm_parser_prompt=None,
                proposed_response_prompt=None, stage_complete_reason=None,
-               excel_file=None, run_id=None, yaml_config_snapshot=None):
-    """Save workflow state to JSON file"""
+               excel_file=None, run_id=None, yaml_config_snapshot=None,
+               step_1_substep=None, step_1_index_id=None, step_1_index_name=None,
+               step_1_retriever_name=None, step_1_retriever_api_name=None):
+    """
+    Save workflow state to JSON file.
+
+    Step 1 substeps for resume:
+      - 'index_created': Index created via API, not yet READY
+      - 'index_ready': Index reached READY status
+      - 'retriever_created': Retriever created via UI, not yet activated
+      - 'retriever_activated': Retriever activated and prompt template updated (Step 1 complete)
+    """
     state_dir = get_state_dir()
-    
+
     # Use run-specific state file if run_id provided
     if run_id:
         state_file = state_dir / f"run_{run_id}_state.json"
     else:
         state_file = state_dir / "current_state.json"
-    
+
     # Store instance_url for site-isolation (cannot resume a run from a different org)
     instance_url = None
     if yaml_config_snapshot:
@@ -214,6 +224,11 @@ def save_state(cycle_number, last_completed_step, sheet_name, refinement_stage,
         "stage_complete_reason": stage_complete_reason,
         "excel_file": excel_file,
         "yaml_config_snapshot": yaml_config_snapshot,  # Frozen YAML config
+        "step_1_substep": step_1_substep,  # Resume point within Step 1
+        "step_1_index_id": step_1_index_id,
+        "step_1_index_name": step_1_index_name,
+        "step_1_retriever_name": step_1_retriever_name,
+        "step_1_retriever_api_name": step_1_retriever_api_name,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")
     }
     
@@ -2135,17 +2150,52 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                 try:
                     headless_mode = config.get('headless', False)
                     state_dir = get_state_dir()
-                    
+
+                    # Create state save callback for substep checkpoints
+                    def save_substep_state(**substep_args):
+                        save_state(
+                            cycle_number=cycle_number,
+                            last_completed_step=0,  # Still in Step 1
+                            sheet_name=None,
+                            refinement_stage=refinement_stage,
+                            stage_status='in_progress',
+                            excel_file=excel_file,
+                            run_id=run_id,
+                            yaml_config_snapshot=config,
+                            **substep_args  # step_1_substep, step_1_index_id, etc.
+                        )
+
+                    # Pass resume state if available - check cycle-specific state first
+                    resume_state_for_step1 = None
+                    if state:
+                        # Try to load cycle-specific state (may have substep info)
+                        cycle_state_file = state_dir / f"run_{run_id}_cycle_{cycle_number}_state.json"
+                        if cycle_state_file.exists():
+                            try:
+                                with open(cycle_state_file, 'r') as f:
+                                    cycle_state = json.load(f)
+                                if cycle_state.get('cycle_number') == cycle_number and cycle_state.get('last_completed_step') == 0:
+                                    resume_state_for_step1 = cycle_state
+                                    log_print(f"  ℹ️  Loaded Cycle {cycle_number} state for substep resume")
+                            except:
+                                pass
+                        # Fallback to main state
+                        if not resume_state_for_step1 and state.get('last_completed_step') == 0:
+                            resume_state_for_step1 = state
+
                     new_index_id, new_retriever_api_name = asyncio.run(run_new_index_pipeline(
                         username=username,
                         password=password,
                         instance_url=instance_url,
                         prompt_template_api_name=prompt_template_name,
                         previous_cycle_prompt=previous_cycle_prompt,
+                        source_index_id=search_index_id,
                         state_dir=state_dir,
                         run_id=run_id,
                         headless=headless_mode,
                         index_prefix=config.get('indexPrefix'),
+                        resume_state=resume_state_for_step1,
+                        save_state_callback=save_substep_state,
                     ))
                     
                     if not new_index_id or not new_retriever_api_name:
@@ -2443,7 +2493,13 @@ def run_full_workflow(excel_file=None, pdf_file=None, model_name=None, yaml_inpu
                 retry_count = 0
                 rejection_context = None
                 prompt_accepted = False
-                
+
+                # Initialize variables to ensure they're defined even if extraction fails
+                proposed_llm_parser_prompt = ''
+                stage_status = ''
+                stage_complete_reason = ''
+                results_data = None
+
                 # Get current prompt length for size constraint
                 current_prompt_length = 0
                 if cycle_number > 1:

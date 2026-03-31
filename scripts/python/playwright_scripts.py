@@ -3249,38 +3249,86 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
         if should_abort():
             await browser.close()
             return ("", False)
+        print("   ↳ Navigating to Einstein Studio...", flush=True)
         await page.get_by_role("button", name="Show more navigation items").click()
         await page.get_by_role("menuitem", name="Einstein Studio").click()
         await page.wait_for_load_state("domcontentloaded", timeout=15000)
         await asyncio.sleep(1.5)
+        print("   ↳ Opening Retrievers page...", flush=True)
         await page.get_by_role("link", name="Retrievers").click()
         await page.wait_for_load_state("domcontentloaded", timeout=15000)
         await asyncio.sleep(1)
+        print("   ↳ Clicking New Retriever...", flush=True)
         await page.get_by_role("button", name="New Retriever").click()
         await asyncio.sleep(0.5)
+        print("   ↳ Waiting for popup...", flush=True)
         async with page.expect_popup(timeout=45000) as popup_info:
             await page.get_by_role("button", name="Next").click()
         popup = await popup_info.value
         await popup.wait_for_load_state("domcontentloaded")
         await asyncio.sleep(1)
+        print("   ↳ Selecting Data Cloud...", flush=True)
         await popup.get_by_text("Data Cloud", exact=True).click()
         await asyncio.sleep(0.3)
         await popup.get_by_role("button", name="Next").click()
         await asyncio.sleep(0.5)
+        print("   ↳ Waiting for DMO combobox...", flush=True)
         dmo_combobox = popup.get_by_role("combobox", name="Select a data model object")
         for _attempt in range(60):
             if await dmo_combobox.is_enabled():
                 break
             await asyncio.sleep(1)
         await dmo_combobox.click()
+        print("   ↳ Selecting RagFileUDMO...", flush=True)
         rag_option = popup.get_by_text("RagFileUDMO", exact=True).first
         await rag_option.wait_for(state="visible", timeout=30000)
         await rag_option.click()
         await asyncio.sleep(0.5)
-        await popup.get_by_role("combobox", name="Data model object's search").click()
-        idx_option = popup.get_by_text(index_name, exact=False).first
-        await idx_option.wait_for(state="visible", timeout=30000)
-        await idx_option.click()
+
+        # Wait briefly for dropdown to be ready
+        print(f"   ↳ Waiting 3s for dropdown to be ready...", flush=True)
+        await asyncio.sleep(3)
+
+        # Open dropdown and select index
+        print(f"   ↳ Searching for index '{index_name}' in dropdown...", flush=True)
+        search_combobox = popup.get_by_role("combobox", name="Data model object's search")
+
+        # Open the dropdown
+        await search_combobox.click()
+        await asyncio.sleep(2)
+
+        # Wait for options to appear
+        await popup.locator('[role="option"]').first.wait_for(state="visible", timeout=10000)
+        option_count = await popup.locator('[role="option"]').count()
+        print(f"   ↳ Dropdown has {option_count} options", flush=True)
+
+        # Find the option by searching through Lightning Web Component structure
+        # LWC options have the text in nested spans - use textContent to get it
+        found = False
+        options = await popup.locator('[role="option"]').all()
+        for i, opt in enumerate(options):
+            try:
+                # Get all text content from nested elements
+                text = await opt.evaluate("el => el.textContent")
+                if text and index_name in text:
+                    print(f"   ✅ Found index at option {i}: '{text.strip()}'", flush=True)
+                    await opt.click()
+                    found = True
+                    break
+            except Exception as e:
+                print(f"   ⚠️  Error checking option {i}: {e}", flush=True)
+                continue
+
+        if not found:
+            # Debug: show what we found
+            print(f"   ❌ Index '{index_name}' not found. Available options:", flush=True)
+            for i, opt in enumerate(options[:10]):
+                try:
+                    text = await opt.evaluate("el => el.textContent")
+                    print(f"      [{i}] '{text.strip() if text else '(empty)'}'", flush=True)
+                except:
+                    print(f"      [{i}] <error>", flush=True)
+            raise Exception(f"Index '{index_name}' not found in dropdown")
         await asyncio.sleep(0.3)
         await popup.get_by_role("button", name="Next").click()
         await asyncio.sleep(0.5)
@@ -3564,16 +3612,45 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
 
 async def run_new_index_pipeline(
     username, password, instance_url, prompt_template_api_name, previous_cycle_prompt,
-    state_dir, run_id=None, headless=False, index_prefix=None
+    source_index_id, state_dir, run_id=None, headless=False, index_prefix=None, resume_state=None,
+    save_state_callback=None
 ):
     """
     Full Cycle 2+ pipeline: Create Index → Poll → Create Retriever → Poll retriever → Update prompt template.
-    Returns (new_search_index_id, new_retriever_api_name) or (None, None) on failure/abort.
-    index_prefix: pipeline-specific prefix like "Opt_P1" (defaults to legacy global name).
+
+    **UPDATED (2026-03-30):** Index creation now uses API-first provisioning (no UI).
+    - Index: API-based via create_search_index_api() ✅
+    - Retriever: Still UI-based via _create_retriever_ui() (to be migrated)
+
+    **UPDATED (2026-03-31):** Added resume support at each substep:
+    - Substep 1a: index_created (index created, needs polling)
+    - Substep 1b: index_ready (index READY, needs retriever creation)
+    - Substep 1c: retriever_created (retriever created, needs polling)
+    - Substep 1d: retriever_activated (complete, Step 1 done)
+
+    Args:
+        username: Salesforce username
+        password: Salesforce password
+        instance_url: Salesforce instance URL
+        prompt_template_api_name: Prompt template API name to update
+        previous_cycle_prompt: Parser prompt from previous cycle
+        source_index_id: Baseline/source index ID to copy structure from
+        state_dir: Directory for state files
+        run_id: Optional run ID for abort checks
+        headless: Headless mode for UI automation (retriever creation)
+        index_prefix: Index name prefix (e.g., "Opt_P1")
+        resume_state: State dict from previous run (for resume)
+        save_state_callback: Callback to save state after each substep
+
+    Returns:
+        Tuple (new_search_index_id, new_retriever_api_name) or (None, None) on failure/abort
+
+    Reference: IMPLEMENTATION_PLAN_20260330_094433.md requirements #1-4, #8-9
     """
     from salesforce_api import (
         get_salesforce_credentials, get_next_index_name, poll_index_until_ready,
         poll_retriever_until_activated, update_genai_prompt_with_retriever, find_index_id_by_name,
+        create_search_index_api,
     )
 
     def should_abort():
@@ -3584,75 +3661,115 @@ async def run_new_index_pipeline(
         raise ValueError("indexPrefix is required in YAML configuration. No hardcoded fallback.")
     if index_prefix[0].isdigit():
         raise ValueError(f"indexPrefix '{index_prefix}' starts with a digit. Salesforce developer names must start with a letter.")
-    index_name = get_next_index_name(instance_url, access_token, base_name=index_prefix)
-    print(f"\n   Creating Search Index: {index_name}", flush=True)
-    try:
-        index_id, full_index_name = await _create_search_index_ui(
-            username, password, instance_url, index_name, previous_cycle_prompt,
-            state_dir, run_id, headless, should_abort, access_token=access_token
-        )
-    except Exception as e:
-        import traceback
-        print(f"   ❌ Create index failed: {e}", flush=True)
-        print("   Traceback:", flush=True)
-        traceback.print_exc()
-        latest = state_dir / (f"run_{run_id}_latest_index.json" if run_id else "latest_index.json")
-        if latest.exists():
-            try:
-                d = json.loads(latest.read_text(encoding="utf-8"))
-                idx = d.get("indexId")
-                if idx:
-                    print(f"   ⚠️ Partial failure: Index ID {idx} created - manual cleanup may be needed.", flush=True)
-            except Exception:
-                pass
-        raise
 
-    # UI save can beat API list consistency; recover by name lookup before failing step 1.
-    if not index_id and full_index_name and not should_abort():
-        print(f"   [create_index] index_id missing after UI save; retrying lookup by name: {full_index_name}", flush=True)
+    # Resume handling: check which substep was completed
+    substep = resume_state.get('step_1_substep') if resume_state else None
+    index_id = resume_state.get('step_1_index_id') if resume_state else None
+    full_index_name = resume_state.get('step_1_index_name') if resume_state else None
+    retriever_display_name = resume_state.get('step_1_retriever_name') if resume_state else None
+    retriever_api_name = resume_state.get('step_1_retriever_api_name') if resume_state else None
+
+    # SUBSTEP 1a: Create Index
+    if substep not in ['index_created', 'index_ready', 'retriever_created', 'retriever_activated']:
+        index_name = get_next_index_name(instance_url, access_token, base_name=index_prefix)
+        print(f"\n   Creating Search Index: {index_name}", flush=True)
+
+        # API-FIRST PROVISIONING (IMPLEMENTATION_PLAN requirement #1)
         try:
-            index_id = find_index_id_by_name(
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            label = f"{index_prefix} {timestamp}"
+
+            # Create index via API (no UI)
+            index_id, full_index_name = create_search_index_api(
                 instance_url=instance_url,
                 access_token=access_token,
-                index_name=full_index_name,
-                max_attempts=6,
-                retry_delay_seconds=5,
+                label=label,
+                developer_name=index_name,
+                parser_prompt=previous_cycle_prompt,
+                source_index_id=source_index_id,
+                chunk_max_tokens=8000,
+                chunk_overlap_tokens=512,
+                run_id=run_id
             )
-            if index_id:
-                print(f"   [create_index] recovered index_id via name lookup: {index_id}", flush=True)
-        except Exception as lookup_err:
-            print(f"   [create_index] lookup-by-name recovery failed: {lookup_err}", flush=True)
+        except Exception as e:
+            import traceback
+            print(f"   ❌ Create index API failed: {e}", flush=True)
+            print("   Traceback:", flush=True)
+            traceback.print_exc()
+            raise
 
-    if not index_id or should_abort():
-        if should_abort():
-            print("   ⚠️ DIAG: Pipeline stopped - run aborted (user cancelled or status changed)", flush=True)
-        else:
-            print("   ⚠️ DIAG: Pipeline stopped - create_search_index returned no index_id (API lookup failed)", flush=True)
-        return (None, None)
-    print(f"   Polling index until Ready...", flush=True)
-    if not poll_index_until_ready(index_id, instance_url, access_token, run_id=run_id):
-        return (None, None)
-    print(f"   Creating Retriever...", flush=True)
-    try:
-        retriever_display_name, _ = await _create_retriever_ui(
-            username, password, instance_url, full_index_name, state_dir, run_id, headless, should_abort
+        if not index_id or should_abort():
+            if should_abort():
+                print("   ⚠️ DIAG: Pipeline stopped - run aborted (user cancelled or status changed)", flush=True)
+            else:
+                print("   ⚠️ DIAG: Pipeline stopped - create_search_index returned no index_id (API lookup failed)", flush=True)
+            return (None, None)
+
+        # Save state after index created
+        print(f"   ✅ Index created: {index_id} ({full_index_name})", flush=True)
+        if save_state_callback:
+            save_state_callback(step_1_substep='index_created', step_1_index_id=index_id, step_1_index_name=full_index_name)
+        substep = 'index_created'
+    else:
+        print(f"\n   ↻ Resuming from substep: {substep}", flush=True)
+        print(f"   ↻ Using existing index: {index_id} ({full_index_name})", flush=True)
+
+    # SUBSTEP 1b: Poll Index
+    if substep == 'index_created':
+        print(f"   Polling index until Ready (this may take 30min-6hr)...", flush=True)
+        if not poll_index_until_ready(index_id, instance_url, access_token, run_id=run_id):
+            return (None, None)
+        print(f"   ✅ Index ready: {index_id}", flush=True)
+        if save_state_callback:
+            save_state_callback(step_1_substep='index_ready', step_1_index_id=index_id, step_1_index_name=full_index_name)
+        substep = 'index_ready'
+    elif substep in ['index_ready', 'retriever_created', 'retriever_activated']:
+        print(f"   ↻ Index already READY, skipping poll", flush=True)
+
+    # SUBSTEP 1c: Create Retriever
+    if substep == 'index_ready':
+        print(f"   Creating Retriever...", flush=True)
+        try:
+            retriever_display_name, _ = await _create_retriever_ui(
+                username, password, instance_url, full_index_name, state_dir, run_id, headless, should_abort
+            )
+        except Exception as e:
+            print(f"   ❌ Create retriever failed: {e}", flush=True)
+            print(f"   ⚠️ Index ID {index_id} - manual cleanup may be needed.", flush=True)
+            raise
+
+        if not retriever_display_name or should_abort():
+            return (None, None)
+        print(f"   ✅ Retriever created: {retriever_display_name}", flush=True)
+        if save_state_callback:
+            save_state_callback(step_1_substep='retriever_created', step_1_index_id=index_id,
+                              step_1_index_name=full_index_name, step_1_retriever_name=retriever_display_name)
+        substep = 'retriever_created'
+    elif substep in ['retriever_created', 'retriever_activated']:
+        print(f"   ↻ Retriever already created, skipping UI creation", flush=True)
+
+    # SUBSTEP 1d: Poll Retriever
+    if substep == 'retriever_created':
+        print(f"   Polling retriever until activated...", flush=True)
+        retriever_api_name, retriever_label = poll_retriever_until_activated(
+            instance_url, access_token, retriever_display_name, run_id=run_id
         )
-    except Exception as e:
-        print(f"   ❌ Create retriever failed: {e}", flush=True)
-        print(f"   ⚠️ Index ID {index_id} - manual cleanup may be needed.", flush=True)
-        raise
+        if not retriever_api_name:
+            return (None, None)
+        print(f"   ✅ Retriever activated: {retriever_api_name}", flush=True)
+        if save_state_callback:
+            save_state_callback(step_1_substep='retriever_activated', step_1_index_id=index_id,
+                              step_1_index_name=full_index_name, step_1_retriever_name=retriever_display_name,
+                              step_1_retriever_api_name=retriever_api_name)
+        substep = 'retriever_activated'
+    elif substep == 'retriever_activated':
+        print(f"   ↻ Retriever already activated: {retriever_api_name}", flush=True)
 
-    if not retriever_display_name or should_abort():
-        return (None, None)
-    print(f"   Polling retriever until activated...", flush=True)
-    retriever_api_name, retriever_label = poll_retriever_until_activated(
-        instance_url, access_token, retriever_display_name, run_id=run_id
-    )
-    if not retriever_api_name:
-        return (None, None)
+    # Update prompt template
     print(f"   Updating prompt template with retriever...", flush=True)
     if not update_genai_prompt_with_retriever(
-        instance_url, access_token, prompt_template_api_name, retriever_api_name, retriever_label or retriever_display_name
+        instance_url, access_token, prompt_template_api_name, retriever_api_name, retriever_display_name
     ):
         return (None, None)
     print(f"   ✅ Pipeline complete. New index: {index_id}, retriever: {retriever_api_name}", flush=True)

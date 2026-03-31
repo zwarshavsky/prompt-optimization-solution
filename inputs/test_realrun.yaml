@@ -20,8 +20,8 @@ configuration:
   takeScreenshots: false
   headless: true
   slowMo: 0
-  geminiModel: "gemini-3-pro-preview"
-  pdfDirectory: "/app/inputs/pdf_test"
+  geminiModel: "gemini-2.5-pro"
+  pdfDirectory: "/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/prompt-optimization-solution/inputs/pdf/RiteHite"
 
   promptTemplateApiName: "RiteHite_Default_Parser_Test"
   promptInputs:
@@ -30,7 +30,9 @@ configuration:
     - apiName: "Input:Question"
       displayName: "Question"
   # Cycle 1 baseline: index (contains LLM parser prompt for Gemini context)
-  searchIndexId: "18lKc000000oMyFIAU"
+  # CRITICAL: Must use index with PDF chunking config (8000/512 tokens), not audio/video files
+  # Working source: 18lKc000000oN3UIAU (APIWorking 0330233438 - has PDF 8k/512)
+  searchIndexId: "18lKc000000oN3UIAU"
   indexPrefix: "Test_20260324"
   refinementStage: "llm_parser"
   maxCycles: 10
