@@ -62,7 +62,6 @@ Thumbs.db
 
 # Shell scripts (not needed for Heroku)
 *.sh
-!verify_setup.sh
 
 # Test data
 inputs/csv/
@@ -74,7 +73,7 @@ inputs/*.txt
 # Documentation (optional - keep if you want)
 # docs/
 
-# Temporary testing and development files
+# Temporary testing and development files (local-only; do not commit)
 temp/
 
 # Proposed/sensitive input variants (use prompt_optimization_input.yaml.template)
@@ -86,4 +85,6 @@ scripts/python/memory_test/test_index_update_memory.py
 scripts/python/test_fixes.py
 /comp_analysis_presentation
 /migration_options
+/presentations/
 inputs/test_two_inputs.yaml
+heroku_streamlit_proof.png

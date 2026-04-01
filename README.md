@@ -477,6 +477,9 @@ source venv/bin/activate  # On macOS/Linux
 venv\Scripts\activate  # On Windows
 ```
 
+> **`temp/` is local-only (not in git)**  
+> Optional dev helpers live under `temp/` so they stay off the remote. After your venv exists, you can run **`bash temp/setup/verify_setup.sh`** from the repo root to sanity-check the venv and imports (create `temp/setup/` yourself if needed). Pre-push / Heroku smoke scripts are typically under **`temp/readiness/`**; multi-pipeline experiment tooling under **`temp/multi_pipeline_gemini_experiment/`**. Fresh clones won’t include these unless you copy them back in.
+
 ### 3. Install Dependencies
 
 ```bash

@@ -16,6 +16,15 @@ import json
 import streamlit.components.v1 as components
 from typing import Any, Dict, List
 
+def _as_int(value: Any, default: int = 0) -> int:
+    """Safely coerce mixed DB/json values (e.g. '1') to int."""
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 # Debug logging setup
   # Silently fail if logging fails
 
@@ -50,6 +59,39 @@ def get_config_dir():
 
 # Path to store runs data (relative to script) - fallback for local development
 RUNS_DATA_FILE = get_app_data_dir() / "runs_data.json"
+
+# Gemini API model IDs for workflow analysis/scoring (must match google-generativeai).
+# If YAML sets geminiModel to a value not listed here, it is prepended so the selectbox still works.
+GEMINI_ANALYSIS_MODEL_IDS = [
+    "gemini-3-pro-preview",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.5-pro-preview-06-05",
+    "gemini-2.0-flash-001",
+]
+GEMINI_ANALYSIS_MODEL_LABELS = {
+    "gemini-3-pro-preview": "Gemini 3 Pro (Preview)",
+    "gemini-2.5-pro": "Gemini 2.5 Pro (Recommended)",
+    "gemini-2.5-flash": "Gemini 2.5 Flash (Fast)",
+    "gemini-2.0-flash": "Gemini 2.0 Flash",
+    "gemini-2.5-pro-preview-06-05": "Gemini 2.5 Pro Preview (06-05)",
+    "gemini-2.0-flash-001": "Gemini 2.0 Flash (001)",
+}
+
+
+def _gemini_analysis_models_for_select(current_id: str) -> list:
+    """Ordered model list for the UI; ensures YAML/custom IDs appear in the dropdown."""
+    base = list(GEMINI_ANALYSIS_MODEL_IDS)
+    cid = (current_id or "").strip()
+    if cid and cid not in base:
+        return [cid] + base
+    return base
+
+
+def _format_gemini_analysis_model(model_id: str) -> str:
+    return GEMINI_ANALYSIS_MODEL_LABELS.get(model_id, model_id)
+
 
 def get_db_connection():
     """Get PostgreSQL database connection from Heroku DATABASE_URL"""
@@ -310,6 +352,40 @@ def kill_job(run_id: str) -> bool:
     finally:
         conn.close()
 
+
+def submit_mfa_code_for_run(run_id: str, mfa_code: str) -> bool:
+    """Store MFA verification code for a run (worker consumes it)."""
+    code = (mfa_code or "").strip()
+    if not run_id or not code:
+        return False
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        payload = {
+            "mfa_code": code,
+            "mfa_code_pending": True,
+            "mfa_code_submitted_at": datetime.now().isoformat(),
+        }
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE runs
+                SET checkpoint_info = COALESCE(checkpoint_info, '{}'::jsonb) || %s::jsonb,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE run_id = %s
+                """,
+                (json.dumps(payload), run_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+    except Exception as e:
+        print(f"Error submitting MFA code for {run_id}: {e}", flush=True)
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
 def load_pdfs_from_db(run_id: str, output_dir: str = None) -> List[str]:
     """Load PDF files from Postgres database and save to filesystem"""
     conn = get_db_connection()
@@ -373,16 +449,14 @@ def load_runs() -> List[Dict]:
     conn = get_db_connection()
     if conn:
         try:
-            # Initialize database if needed
-            init_database()
-            
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT run_id, status, config, progress, output_lines, 
-                           results, error, error_details, excel_file_path, 
+                    SELECT run_id, status, config, progress, output_lines,
+                           results, error, error_details, excel_file_path,
                            started_at, completed_at, heartbeat_at, checkpoint_info
                     FROM runs
-                    ORDER BY started_at DESC
+                    ORDER BY started_at DESC NULLS LAST
+                    LIMIT 200
                 """)
                 
                 runs = []
@@ -441,26 +515,24 @@ def detect_and_mark_dead_jobs(stale_threshold_minutes: int = 30) -> int:
     
     try:
         with conn.cursor() as cur:
-            # Find jobs with status='running' that have stale or missing heartbeat
+            # Stale = last activity older than threshold. Use COALESCE so we never treat
+            # "heartbeat NULL" alone as dead (that falsely failed jobs on every Jobs page load).
             cur.execute("""
-                SELECT run_id, heartbeat_at, updated_at
+                SELECT run_id, heartbeat_at, updated_at, started_at
                 FROM runs
                 WHERE status = 'running'
-                AND (
-                    heartbeat_at IS NULL 
-                    OR heartbeat_at < NOW() - INTERVAL '%s minutes'
-                )
+                AND COALESCE(heartbeat_at, updated_at, started_at)
+                    < (NOW() - (%s * INTERVAL '1 minute'))
             """, (stale_threshold_minutes,))
             
             dead_jobs = cur.fetchall()
             count = 0
             
-            for run_id, heartbeat_at, updated_at in dead_jobs:
+            for run_id, heartbeat_at, updated_at, started_at in dead_jobs:
                 # Mark as failed with appropriate error message
                 error_msg = f"Job appears to have stopped (no heartbeat detected for > {stale_threshold_minutes} minutes). Possible dyno restart or process crash."
                 
-                # Use heartbeat_at if available, otherwise updated_at
-                last_activity = heartbeat_at if heartbeat_at else updated_at
+                last_activity = heartbeat_at or updated_at or started_at
                 
                 cur.execute("""
                     UPDATE runs
@@ -471,6 +543,10 @@ def detect_and_mark_dead_jobs(stale_threshold_minutes: int = 30) -> int:
                     WHERE run_id = %s
                 """, (error_msg, last_activity, run_id))
                 count += 1
+                print(
+                    f"[APP] Dead job → failed: {run_id} (heartbeat_at={heartbeat_at}, updated_at={updated_at})",
+                    flush=True,
+                )
             
             conn.commit()
             if count > 0:
@@ -489,9 +565,6 @@ def save_runs(runs: List[Dict]) -> None:
     conn = get_db_connection()
     if conn:
         try:
-            # Initialize database if needed
-            init_database()
-            
             with conn.cursor() as cur:
                 for run in runs:
                     # Convert datetime objects to strings for JSONB storage
@@ -596,62 +669,136 @@ def save_runs(runs: List[Dict]) -> None:
     except Exception as e:
         print(f"Error saving runs to JSON file: {e}")
 
-# Page configuration
-st.set_page_config(
-    page_title="Prompt Optimization",
-    page_icon="🚀",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
-# Custom CSS matching mockup exactly
-st.markdown("""
-<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
-<style>
+def build_app_css(dark_mode: bool) -> str:
+    """Light/dark theme variables + layout (sticky sidebar) for Streamlit."""
+    if dark_mode:
+        vars_block = """
+    :root {
+        --primary-color: #FF6B6B;
+        --primary-hover: #ff8585;
+        --secondary-color: #161923;
+        --background-color: #0e1117;
+        --sidebar-bg: #161b22;
+        --text-color: #f0f6fc;
+        --muted-color: #8b949e;
+        --border-color: #30363d;
+        --section-bg: #161b22;
+        --section-shadow: rgba(0, 0, 0, 0.35);
+        --input-bg: #21262d;
+        --input-text: #f0f6fc;
+        --question-caption: #8b949e;
+    }
+        """
+    else:
+        vars_block = """
     :root {
         --primary-color: #FF4B4B;
+        --primary-hover: #E63946;
         --secondary-color: #0E1117;
         --background-color: #FAFAFA;
         --sidebar-bg: #FFFFFF;
         --text-color: #262730;
+        --muted-color: #666666;
         --border-color: #E6E9EF;
+        --section-bg: #ffffff;
+        --section-shadow: rgba(0, 0, 0, 0.05);
+        --input-bg: #ffffff;
+        --input-text: #262730;
+        --question-caption: #666666;
     }
-    
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    
-    .main .block-container {
+        """
+
+    layout_sidebar = """
+    /* Sidebar stays visible while main content scrolls */
+    .stApp > div {
+        align-items: flex-start !important;
+    }
+    [data-testid="stSidebar"] {
+        position: sticky !important;
+        top: 0 !important;
+        align-self: flex-start !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+        min-height: 100vh !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        z-index: 999991 !important;
+        background-color: var(--sidebar-bg) !important;
+        border-right: 1px solid var(--border-color);
+    }
+    [data-testid="stSidebar"] .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 2rem !important;
+    }
+    /* Hide Streamlit collapse chevron — sidebar stays open */
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stSidebar"] [data-testid="stBaseButton-headerNoPadding"] {
+        display: none !important;
+        pointer-events: none !important;
+        visibility: hidden !important;
+    }
+    """
+
+    return f"""
+{vars_block}
+{layout_sidebar}
+    .stApp {{
+        background-color: var(--background-color);
+        color: var(--text-color);
+    }}
+    [data-testid="stAppViewContainer"] {{
+        background-color: var(--background-color);
+    }}
+    [data-testid="stHeader"] {{
+        background-color: var(--background-color);
+    }}
+    .sidebar-brand h1 {{
+        color: var(--primary-color) !important;
+        font-size: 1.5rem;
+        margin-bottom: 0.25rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }}
+    .sidebar-brand p {{
+        color: var(--muted-color) !important;
+        font-size: 0.875rem;
+        margin-bottom: 1rem;
+    }}
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {{
+        color: var(--text-color);
+    }}
+    /* Do not hide header / #MainMenu — that hid the hamburger and trapped users after sidebar collapse. */
+    footer {{visibility: hidden;}}
+    .main .block-container {{
         padding-top: 2rem;
         padding-bottom: 2rem;
         max-width: 1200px;
-    }
-    
-    .stButton > button {
+    }}
+    .stButton > button {{
         background-color: var(--primary-color);
         color: white;
         border-radius: 0.5rem;
         font-weight: 500;
         padding: 0.625rem 1.25rem;
         border: none;
-    }
-    
-    .stButton > button:hover {
-        background-color: #E63946;
+    }}
+    .stButton > button:hover {{
+        background-color: var(--primary-hover);
         transform: translateY(-1px);
-        box-shadow: 0 4px 8px rgba(255, 75, 75, 0.2);
-    }
-    
-    .config-section {
-        background: white;
+        box-shadow: 0 4px 8px rgba(255, 75, 75, 0.25);
+    }}
+    .config-section {{
+        background: var(--section-bg);
         border: 1px solid var(--border-color);
         border-radius: 0.75rem;
         padding: 1.5rem;
         margin-bottom: 1.5rem;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-    }
-    
-    .section-title {
+        box-shadow: 0 1px 3px var(--section-shadow);
+    }}
+    .section-title {{
         font-size: 1.25rem;
         font-weight: 600;
         color: var(--text-color);
@@ -661,9 +808,8 @@ st.markdown("""
         gap: 0.5rem;
         padding-bottom: 0.75rem;
         border-bottom: 1px solid var(--border-color);
-    }
-    
-    .priority-badge {
+    }}
+    .priority-badge {{
         background-color: var(--primary-color);
         color: white;
         font-weight: 600;
@@ -673,88 +819,88 @@ st.markdown("""
         cursor: move;
         user-select: none;
         padding: 0.5rem;
-    }
-    
-    .question-item {
-        background: #F8F9FA;
+    }}
+    .question-item {{
+        background: transparent;
         border: 1px solid var(--border-color);
         border-radius: 0.5rem;
         padding: 1rem;
         margin-bottom: 1rem;
-    }
-    
-    .fallback-item {
+    }}
+    .fallback-item {{
         transition: all 0.2s;
         cursor: move;
         margin-bottom: 1rem;
-    }
-    
-    .fallback-item:hover {
+    }}
+    .fallback-item:hover {{
         transform: translateX(5px);
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-    }
-    
-    .fallback-item.dragging {
+        box-shadow: 0 2px 8px var(--section-shadow);
+    }}
+    .fallback-item.dragging {{
         opacity: 0.5;
         transform: rotate(2deg);
-    }
-    
-    /* Fix white bars - hide empty containers, captions that create boxes */
-    div[data-testid*="stTextInput"]:has(input[value=""][placeholder=""]),
-    div[data-testid*="stTextInput"]:has(input:not([value]):not(:focus)),
+    }}
+    div[data-testid="stTextInput"] label,
+    div[data-testid="stTextArea"] label,
+    div[data-testid="stSelectbox"] label,
+    div[data-testid="stNumberInput"] label {{
+        color: var(--text-color) !important;
+    }}
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stTextArea"] textarea {{
+        background-color: var(--input-bg) !important;
+        color: var(--input-text) !important;
+        border-color: var(--border-color) !important;
+    }}
+    div[data-baseweb="select"] > div {{
+        background-color: var(--input-bg) !important;
+        border-color: var(--border-color) !important;
+    }}
+    div[data-testid="stRadio"] label,
+    div[data-testid="stRadio"] p {{
+        color: var(--text-color) !important;
+    }}
+    div[data-testid="stExpander"] {{
+        background-color: var(--section-bg);
+        border: 1px solid var(--border-color);
+    }}
+    /* Fix white bars — do NOT hide stTextInput by empty value; that hid Product/Question multi-input fields */
     div[data-testid*="stCaption"]:empty,
     div[data-testid*="stMarkdown"]:has(> p:empty),
-    div[data-testid*="column"]:has(> div:empty:not([data-testid])) {
+    div[data-testid*="column"]:has(> div:empty:not([data-testid])) {{
         display: none !important;
-    }
-    
-    /* Hide empty rounded containers that look like input fields */
-    div[data-baseweb="input"]:has(input[value=""]:not(:focus):not([placeholder])),
+    }}
     div.element-container:has(> div:empty),
-    div[data-testid*="column"]:empty {
+    div[data-testid*="column"]:empty {{
         display: none !important;
-    }
-    
-    /* Ensure config sections don't have extra padding */
-    .config-section {
+    }}
+    .config-section {{
         padding: 1.5rem !important;
         margin-bottom: 1.5rem;
-    }
-    
-    /* Remove extra spacing from form */
-    form {
+    }}
+    form {{
         margin: 0;
         padding: 0;
-    }
-    
-    /* Hide any empty white rounded rectangles */
+    }}
     div[style*="border-radius"]:empty,
-    div[class*="rounded"]:empty:not([data-testid*="st"]) {
+    div[class*="rounded"]:empty:not([data-testid*="st"]) {{
         display: none !important;
-    }
-    
-    /* Hide empty config-section divs that create white boxes */
+    }}
     .config-section:empty,
-    .config-section:not(:has(h3)):not(:has(input)):not(:has(select)):not(:has(textarea)):not(:has(button)) {
+    .config-section:not(:has(h3)):not(:has(input)):not(:has(select)):not(:has(textarea)):not(:has(button)) {{
         display: none !important;
         height: 0 !important;
         padding: 0 !important;
         margin: 0 !important;
-    }
-    
-    /* Hide empty containers after sections */
+    }}
     .config-section + div:empty,
-    .config-section + div:not(:has(*)) {
+    .config-section + div:not(:has(*)) {{
         display: none !important;
-    }
-    
-    /* Remove spacing and grey bar in Test Questions section */
-    .test-questions-section .test-questions-title {
+    }}
+    .test-questions-section .test-questions-title {{
         margin-bottom: 0 !important;
         padding-bottom: 0 !important;
-    }
-    
-    /* Remove grey bar from ALL question items - no grey backgrounds on any questions */
+    }}
     .test-questions-section .question-item,
     .test-questions-section .question-item.first-question,
     .test-questions-section .first-question,
@@ -763,71 +909,94 @@ st.markdown("""
     .config-section.test-questions-section .question-item,
     .config-section.test-questions-section .question-item:first-child,
     .test-questions-section > div:has(.question-item),
-    .test-questions-section div:has(.first-question) {
+    .test-questions-section div:has(.first-question) {{
         background: transparent !important;
         background-color: transparent !important;
         border: none !important;
         border-width: 0 !important;
-    }
-    
-    /* First question: no top padding/margin */
+    }}
     .test-questions-section .question-item.first-question,
-    .test-questions-section .question-item:first-child {
+    .test-questions-section .question-item:first-child {{
         padding-top: 0 !important;
         margin-top: 0 !important;
-    }
-    
-    /* Ensure no grey background shows through on any question */
-    .test-questions-section .question-item * {
+    }}
+    .test-questions-section .question-item * {{
         background: inherit !important;
-    }
-    
-    /* Remove any Streamlit-generated spacing between title and first question */
+    }}
     .test-questions-section h3 + *,
     .test-questions-section h3 ~ div:first-of-type,
     .test-questions-section [data-testid*="stMarkdown"]:has(h3.test-questions-title) + *,
     .test-questions-section [data-testid*="stMarkdown"]:has(h3.test-questions-title) ~ *,
     .test-questions-section [data-testid*="stMarkdown"]:has(h3.test-questions-title) + [data-testid*="stMarkdown"],
-    .test-questions-section [data-testid*="stMarkdown"]:has(h3.test-questions-title) ~ [data-testid*="stMarkdown"]:first-of-type {
+    .test-questions-section [data-testid*="stMarkdown"]:has(h3.test-questions-title) ~ [data-testid*="stMarkdown"]:first-of-type {{
         margin-top: 0 !important;
         padding-top: 0 !important;
-    }
-    
-    /* Target the first question-item wrapper specifically */
-    .test-questions-section [data-testid*="stMarkdown"]:has(.question-item:first-child) {
+    }}
+    .test-questions-section [data-testid*="stMarkdown"]:has(.question-item:first-child) {{
         margin-top: 0 !important;
         padding-top: 0 !important;
-    }
-    
-    /* Remove any empty divs or spacing elements */
+    }}
     .test-questions-section > div:empty,
-    .test-questions-section > div:not(:has(*)) {
+    .test-questions-section > div:not(:has(*)) {{
         display: none !important;
         height: 0 !important;
         margin: 0 !important;
         padding: 0 !important;
-    }
-    
-    /* Ensure no grey backgrounds on wrapper elements between questions */
-    .test-questions-section [data-testid*="stMarkdown"]:has(.question-item) {
+    }}
+    .test-questions-section [data-testid*="stMarkdown"]:has(.question-item) {{
         background: transparent !important;
         background-color: transparent !important;
-    }
-    
-    /* Remove any grey backgrounds from Streamlit column wrappers in question items */
+    }}
     .test-questions-section .question-item [data-testid*="column"],
-    .test-questions-section .question-item [data-testid*="stColumn"] {
+    .test-questions-section .question-item [data-testid*="stColumn"] {{
         background: transparent !important;
         background-color: transparent !important;
-    }
-    
-    /* Ensure no spacing creates visible grey bars between questions */
-    .test-questions-section .question-item + .question-item {
+    }}
+    .test-questions-section .question-item + .question-item {{
         margin-top: 0 !important;
         padding-top: 0 !important;
-    }
-</style>
-""", unsafe_allow_html=True)
+    }}
+    .test-questions-section [data-testid="stCaption"] {{
+        color: var(--question-caption) !important;
+    }}
+    """
+
+
+# Page configuration
+st.set_page_config(
+    page_title="Prompt Optimization",
+    page_icon="🚀",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = False
+
+# Sidebar first so dark_mode toggle is applied before theme CSS on each rerun
+with st.sidebar:
+    st.toggle("🌙 Dark mode", key="dark_mode", help="Dark theme for the app")
+    st.markdown(
+        """
+    <div class="sidebar-brand" style="padding: 0.5rem 0 0 0;">
+        <h1><i class="bi bi-rocket-takeoff"></i> Prompt Optimization</h1>
+        <p>Automated RAG Workflow</p>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+    page = st.radio(
+        "Navigation",
+        ["Create New Run", "Jobs"],
+        label_visibility="collapsed",
+        key="nav_radio",
+    )
+
+st.markdown(
+    '<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">'
+    f"<style>{build_app_css(st.session_state.get('dark_mode', False))}</style>",
+    unsafe_allow_html=True,
+)
 
 # Initialize session state
 # Initialize session state with persistent data
@@ -839,17 +1008,69 @@ if 'current_run' not in st.session_state:
     st.session_state.current_run = running_runs[0] if running_runs else None
 if 'show_create_modal' not in st.session_state:
     st.session_state.show_create_modal = False
+if 'show_mfa_modal_for' not in st.session_state:
+    st.session_state.show_mfa_modal_for = None
 if 'fallback_models' not in st.session_state:
     st.session_state.fallback_models = [""]
 if 'questions' not in st.session_state:
     st.session_state.questions = [{"number": "Q1", "text": "", "expectedAnswer": ""}]
 # Removed pdf_directory_path - PDFs must be uploaded via file uploader only
 
+
+def open_mfa_modal(run_id: str):
+    st.session_state.show_mfa_modal_for = run_id
+
+
+def close_mfa_modal():
+    st.session_state.show_mfa_modal_for = None
+
 # Helpers for dynamic add/remove without HTML/JS handlers
+def _configuration_prompt_inputs(yaml_dict: Any) -> List[Dict[str, Any]]:
+    """Return configuration.promptInputs from uploaded or default YAML."""
+    if not yaml_dict or not isinstance(yaml_dict, dict):
+        return []
+    cfg = yaml_dict.get("configuration") or {}
+    pins = cfg.get("promptInputs")
+    return pins if isinstance(pins, list) else []
+
+
+def _init_question_widget_keys_from_yaml(test_questions: List[Any], config: Dict[str, Any]) -> None:
+    """Populate form_q_* session keys for each question (single text and/or multi-input)."""
+    prompt_inputs = config.get("promptInputs") or []
+    for i, q in enumerate(test_questions):
+        if not isinstance(q, dict):
+            continue
+        q_num_key = f"form_q_num_{i}"
+        q_text_key = f"form_q_text_{i}"
+        q_expected_key = f"form_q_expected_{i}"
+        if q.get("number"):
+            st.session_state[q_num_key] = q["number"]
+        if q.get("text") is not None:
+            st.session_state[q_text_key] = q["text"]
+        if q.get("expectedAnswer") is not None:
+            st.session_state[q_expected_key] = q["expectedAnswer"]
+        inp = q.get("inputs")
+        if not isinstance(inp, dict):
+            inp = {}
+        for j, pin in enumerate(prompt_inputs):
+            if not isinstance(pin, dict):
+                continue
+            aname = pin.get("apiName") or pin.get("api_name")
+            key = f"form_q_input_{i}_{j}"
+            if aname is not None:
+                st.session_state[key] = str(inp.get(aname, "") or "")
+
+
 def add_question():
     qs = st.session_state.get('questions', [])
     new_num = len(qs) + 1
-    qs.append({"number": f"Q{new_num}", "text": "", "expectedAnswer": ""})
+    yaml_data = st.session_state.get("uploaded_yaml_data")
+    pin_list = _configuration_prompt_inputs(yaml_data) if yaml_data else []
+    if pin_list:
+        blank = {pin.get("apiName"): "" for pin in pin_list if pin.get("apiName")}
+        qs.append({"number": f"Q{new_num}", "inputs": blank, "expectedAnswer": ""})
+    else:
+        qs.append({"number": f"Q{new_num}", "text": "", "expectedAnswer": ""})
     st.session_state.questions = qs
 
 
@@ -867,6 +1088,19 @@ def add_fallback():
     if len(fbs) < 5:
         fbs.append("")
     st.session_state.fallback_models = fbs
+
+
+def remove_fallback_at(idx: int):
+    """Remove one fallback row and clear widget keys so Streamlit does not reuse stale values."""
+    fbs = list(st.session_state.get("fallback_models", []))
+    if not (0 <= idx < len(fbs)):
+        return
+    fbs.pop(idx)
+    st.session_state.fallback_models = fbs
+    for k in list(st.session_state.keys()):
+        if isinstance(k, str) and k.startswith("form_fallback_"):
+            del st.session_state[k]
+
 
 # Load local default YAML template (optional, for local testing)
 @st.cache_data
@@ -1356,17 +1590,8 @@ button_handler_js = """
             }
         });
         
-        // Handle Add Fallback Model button
-        parentDoc.querySelectorAll('button').forEach(btn => {
-            if (btn.textContent.includes('Add Fallback Model') && !btn.dataset.handlerAttached) {
-                btn.dataset.handlerAttached = 'true';
-                btn.addEventListener('click', function(e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    parentWindow.location.href = parentWindow.location.pathname + '?add_fallback=1&t=' + Date.now();
-                }, true);
-            }
-        });
+        // Do NOT hijack "Add Fallback Model" — form_submit_button uses on_click=add_fallback.
+        // Old JS navigated to ?add_fallback= and reset Gemini/primary/fallback widget state.
     }
     
     // Run immediately and repeatedly
@@ -1395,24 +1620,6 @@ button_handler_js = """
 </script>
 """
 
-# Sidebar Navigation
-with st.sidebar:
-    st.markdown("""
-    <div style="padding: 1rem 0;">
-        <h1 style="color: #FF4B4B; font-size: 1.5rem; margin-bottom: 0.25rem; display: flex; align-items: center; gap: 0.5rem;">
-            <i class="bi bi-rocket-takeoff"></i> Prompt Optimization
-        </h1>
-        <p style="color: #666; font-size: 0.875rem; margin-bottom: 2rem;">Automated RAG Workflow</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    page = st.radio(
-        "Navigation",
-        ["Create New Run", "Jobs"],
-        label_visibility="collapsed",
-        key="nav_radio"
-    )
-
 # Main Content
 if page == "Create New Run":
     # Only generate a new page ID if no YAML is loaded (to force fresh widgets)
@@ -1422,24 +1629,21 @@ if page == "Create New Run":
     has_yaml_loaded = 'uploaded_yaml_data' in st.session_state and st.session_state.get('uploaded_yaml_data') is not None
     
     if not has_yaml_loaded:
-        # No YAML loaded - generate new page ID to force fresh widgets
-        st.session_state.create_run_page_id = f"{time.time()}_{random.randint(1000,9999)}"
+        # No YAML: create page ID once per session (do NOT regenerate every rerun — that
+        # fought form submits and wiped in-progress values). Clear form_* only on that first init.
+        if 'create_run_page_id' not in st.session_state:
+            st.session_state.create_run_page_id = f"{time.time()}_{random.randint(1000,9999)}"
+            keys_to_delete = [key for key in list(st.session_state.keys()) if key.startswith('form_')]
+            for key in keys_to_delete:
+                del st.session_state[key]
+            if 'fallback_models' not in st.session_state:
+                st.session_state.fallback_models = [""]
+            if 'questions' not in st.session_state:
+                st.session_state.questions = [{"number": "Q1", "text": "", "expectedAnswer": ""}]
     else:
         # YAML loaded - keep existing page ID or create one if it doesn't exist
         if 'create_run_page_id' not in st.session_state:
             st.session_state.create_run_page_id = f"{time.time()}_{random.randint(1000,9999)}"
-    if not has_yaml_loaded:
-        # Clear ALL form-related session state keys BEFORE rendering widgets
-        # This ensures fields start blank unless YAML is actively being uploaded
-        keys_to_delete = [key for key in list(st.session_state.keys()) if key.startswith('form_')]
-        for key in keys_to_delete:
-            del st.session_state[key]
-        # Only reset fallback models and questions if they don't exist yet
-        # Don't reset if user has already added items via buttons
-        if 'fallback_models' not in st.session_state:
-            st.session_state.fallback_models = [""]
-        if 'questions' not in st.session_state:
-            st.session_state.questions = [{"number": "Q1", "text": "", "expectedAnswer": ""}]
     
     # Page Header
     st.markdown("""
@@ -1491,6 +1695,11 @@ if page == "Create New Run":
                 prompt_tmpl_val = config.get('promptTemplateApiName', "")
                 st.session_state.form_search_index = search_idx_val
                 st.session_state.form_prompt_template = prompt_tmpl_val
+                st.session_state.form_index_prefix = config.get("indexPrefix", "") or ""
+                _mc = config.get("maxCycles", 10)
+                st.session_state.form_max_cycles = int(_mc) if _mc is not None else 10
+                _mn = config.get("minCycles", _mc)
+                st.session_state.form_min_cycles = int(_mn) if _mn is not None else st.session_state.form_max_cycles
                 refinement_stage_from_yaml = config.get('refinementStage', "")
                 if refinement_stage_from_yaml:
                     st.session_state.form_refinement_stage = refinement_stage_from_yaml
@@ -1513,17 +1722,7 @@ if page == "Create New Run":
                 test_questions = uploaded_yaml_data.get('questions', []) or config.get('testQuestions', [])
                 if test_questions:
                     st.session_state.questions = test_questions
-                    # Initialize widget session state keys for all questions from YAML
-                    for i, q in enumerate(test_questions):
-                        q_num_key = f"form_q_num_{i}"
-                        q_text_key = f"form_q_text_{i}"
-                        q_expected_key = f"form_q_expected_{i}"
-                        if q.get("number"):
-                            st.session_state[q_num_key] = q["number"]
-                        if q.get("text"):
-                            st.session_state[q_text_key] = q["text"]
-                        if q.get("expectedAnswer"):
-                            st.session_state[q_expected_key] = q["expectedAnswer"]
+                    _init_question_widget_keys_from_yaml(test_questions, config)
                 else:
                     st.session_state.questions = [{"number": "Q1", "text": "", "expectedAnswer": ""}]
                 
@@ -1554,6 +1753,11 @@ if page == "Create New Run":
                 st.session_state.form_instance = salesforce_config.get('instanceUrl', "")
             st.session_state.form_search_index = config.get('searchIndexId', "")
             st.session_state.form_prompt_template = config.get('promptTemplateApiName', "")
+            st.session_state.form_index_prefix = config.get("indexPrefix", "") or ""
+            _mc2 = config.get("maxCycles", 10)
+            st.session_state.form_max_cycles = int(_mc2) if _mc2 is not None else 10
+            _mn2 = config.get("minCycles", _mc2)
+            st.session_state.form_min_cycles = int(_mn2) if _mn2 is not None else st.session_state.form_max_cycles
             st.session_state.form_refinement_stage = config.get('refinementStage', "llm_parser")
             st.session_state.form_gemini_model = config.get('geminiModel', "gemini-2.5-pro")
             prompt_builder_models = config.get('prompt_builder_models', {})
@@ -1568,18 +1772,8 @@ if page == "Create New Run":
             # Check both root level 'questions' and config level 'testQuestions'
             test_questions = uploaded_yaml_data.get('questions', []) or config.get('testQuestions', [])
             st.session_state.questions = test_questions if test_questions else [{"number": "Q1", "text": "", "expectedAnswer": ""}]
-            # Initialize question widget keys
             if test_questions:
-                for i, q in enumerate(test_questions):
-                    q_num_key = f"form_q_num_{i}"
-                    q_text_key = f"form_q_text_{i}"
-                    q_expected_key = f"form_q_expected_{i}"
-                    if q.get("number"):
-                        st.session_state[q_num_key] = q["number"]
-                    if q.get("text"):
-                        st.session_state[q_text_key] = q["text"]
-                    if q.get("expectedAnswer"):
-                        st.session_state[q_expected_key] = q["expectedAnswer"]
+                _init_question_widget_keys_from_yaml(test_questions, config)
             st.session_state.form_custom_instructions = config.get('customInstructions', "")
             st.session_state.yaml_prefilled = True
     
@@ -1610,8 +1804,18 @@ if page == "Create New Run":
     # Directory picker will be in the button component
     components.html(drag_drop_js, height=0)
     
+    # Defaults for refinement cycle inputs (YAML prefill overwrites when present)
+    if "form_index_prefix" not in st.session_state:
+        st.session_state.form_index_prefix = ""
+    if "form_min_cycles" not in st.session_state:
+        st.session_state.form_min_cycles = 5
+    if "form_max_cycles" not in st.session_state:
+        st.session_state.form_max_cycles = 10
+    
     # Create Run Form (always visible on this page, not a modal)
-    with st.form("create_run_form", clear_on_submit=True):
+    # clear_on_submit=False: any form_submit_button (Add Fallback, Add Question, 🗑 rows, Start Workflow)
+    # triggers a form "submit"; True would wipe Gemini/primary/fallback/questions on those actions.
+    with st.form("create_run_form", clear_on_submit=False):
             # 1. Salesforce Configuration
             st.markdown('<div class="config-section">', unsafe_allow_html=True)
             st.markdown('<h3 class="section-title"><i class="bi bi-cloud"></i> Salesforce Configuration</h3>', unsafe_allow_html=True)
@@ -1713,6 +1917,35 @@ if page == "Create New Run":
             )
             st.markdown('</div>', unsafe_allow_html=True)
             
+            # 2b. Index prefix & cycle bounds (required for Cycle 2+ Playwright index creation)
+            st.markdown('<div class="config-section">', unsafe_allow_html=True)
+            st.markdown('<h3 class="section-title"><i class="bi bi-tag"></i> Index naming & refinement cycles</h3>', unsafe_allow_html=True)
+            st.text_input(
+                "Index prefix (required)",
+                key="form_index_prefix",
+                placeholder="e.g. Heroku_MyJob — must start with a letter",
+                help="New search indexes use this prefix (V2, V3, …). Salesforce developer names must start with a letter.",
+            )
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                st.number_input(
+                    "Minimum refinement cycles",
+                    min_value=1,
+                    max_value=50,
+                    key="form_min_cycles",
+                    help="Workflow will not early-exit before this many cycles (matches YAML minCycles).",
+                )
+            with _c2:
+                st.number_input(
+                    "Maximum refinement cycles",
+                    min_value=1,
+                    max_value=50,
+                    key="form_max_cycles",
+                    help="Upper bound on refinement loops (matches YAML maxCycles).",
+                )
+            st.caption("Upload a YAML with `indexPrefix`, `minCycles`, and `maxCycles` to pre-fill these fields.")
+            st.markdown('</div>', unsafe_allow_html=True)
+            
             # 3. PDF Files (NOT from YAML - must be uploaded)
             st.markdown('<div class="config-section">', unsafe_allow_html=True)
             st.markdown('<h3 class="section-title"><i class="bi bi-file-pdf"></i> PDF Files</h3>', unsafe_allow_html=True)
@@ -1765,21 +1998,16 @@ if page == "Create New Run":
             st.markdown('<div class="config-section">', unsafe_allow_html=True)
             st.markdown('<h3 class="section-title"><i class="bi bi-cpu"></i> Gemini Analysis Model</h3>', unsafe_allow_html=True)
             
-            gemini_models = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro-preview-06-05"]
             gemini_value = st.session_state.get('form_gemini_model', "gemini-2.5-pro")
+            gemini_models = _gemini_analysis_models_for_select(gemini_value)
             gemini_index = gemini_models.index(gemini_value) if gemini_value in gemini_models else 0
-            
+
             gemini_model = st.selectbox(
                 "Model",
                 gemini_models,
                 index=gemini_index,
                 key="form_gemini_model",
-                format_func=lambda x: {
-                    "gemini-2.5-pro": "Gemini 2.5 Pro (Recommended)",
-                    "gemini-2.5-flash": "Gemini 2.5 Flash (Fast)",
-                    "gemini-2.0-flash": "Gemini 2.0 Flash",
-                    "gemini-2.5-pro-preview-06-05": "Gemini 2.5 Pro Preview"
-                }.get(x, x)
+                format_func=_format_gemini_analysis_model,
             )
             st.caption("Model used for analyzing/scoring responses")
             st.markdown('</div>', unsafe_allow_html=True)
@@ -1790,10 +2018,10 @@ if page == "Create New Run":
             
             # Get prompt builder models from session state only (populated by YAML upload or user input)
             primary_model_value = st.session_state.get('form_primary_model', "")
-            # Default to OpenAI GPT-4 if nothing loaded yet
+            # Default to OpenAI GPT-4 for index math only — do NOT write session_state here before
+            # the selectbox runs; that clobbered user picks after form submits (e.g. Add Fallback).
             if not primary_model_value:
                 primary_model_value = "sfdc_ai__DefaultOpenAIGPT4"
-                st.session_state.form_primary_model = primary_model_value
             
             primary_models_list = [
                 "sfdc_ai__DefaultBedrockAnthropicClaude45Sonnet",
@@ -1836,59 +2064,61 @@ if page == "Create New Run":
             # Fallback models container
             st.markdown('<div id="fallback-models-container" class="sortable-list">', unsafe_allow_html=True)
             fallback_models = []
+            fallback_options = [
+                "",
+                "sfdc_ai__DefaultOpenAIGPT5",
+                "sfdc_ai__DefaultOpenAIGPT4",
+                "sfdc_ai__DefaultOpenAIGPT4Turbo",
+                "sfdc_ai__DefaultOpenAIGPT4OmniMini",
+                "sfdc_ai__DefaultBedrockAnthropicClaude45Sonnet",
+                "sfdc_ai__DefaultAnthropicClaude35Sonnet",
+                "sfdc_ai__DefaultAnthropicClaude35Haiku",
+                "sfdc_ai__DefaultGoogleGemini25Pro",
+                "sfdc_ai__DefaultGoogleGemini3Pro",
+                "sfdc_ai__DefaultGoogleGemini15Flash",
+            ]
+            _fb_format = lambda x: {
+                "sfdc_ai__DefaultOpenAIGPT5": "OpenAI GPT-5",
+                "sfdc_ai__DefaultOpenAIGPT4": "OpenAI GPT-4",
+                "sfdc_ai__DefaultOpenAIGPT4Turbo": "OpenAI GPT-4 Turbo",
+                "sfdc_ai__DefaultOpenAIGPT4OmniMini": "OpenAI GPT-4 Omni Mini",
+                "sfdc_ai__DefaultBedrockAnthropicClaude45Sonnet": "Anthropic Claude 4.5 Sonnet",
+                "sfdc_ai__DefaultAnthropicClaude35Sonnet": "Anthropic Claude 3.5 Sonnet",
+                "sfdc_ai__DefaultAnthropicClaude35Haiku": "Anthropic Claude 3.5 Haiku",
+                "sfdc_ai__DefaultGoogleGemini25Pro": "Google Gemini 2.5 Pro",
+                "sfdc_ai__DefaultGoogleGemini3Pro": "Google Gemini 3 Pro",
+                "sfdc_ai__DefaultGoogleGemini15Flash": "Google Gemini 1.5 Flash",
+            }.get(x, x) if x else "Select fallback model..."
+
             for i, model in enumerate(st.session_state.fallback_models):
-                col1, col2, col3 = st.columns([1, 10, 1])
+                col1, col2, col3 = st.columns([1, 8, 2])
                 with col1:
                     st.markdown(f'<div class="fallback-item"><div class="input-group"><span class="priority-badge drag-handle" title="Drag to reorder"><i class="bi bi-grip-vertical"></i> {i+1}</span>', unsafe_allow_html=True)
                 with col2:
-                    fallback_options = [
-                        "",
-                        "sfdc_ai__DefaultOpenAIGPT5",
-                        "sfdc_ai__DefaultOpenAIGPT4",
-                        "sfdc_ai__DefaultOpenAIGPT4Turbo",
-                        "sfdc_ai__DefaultOpenAIGPT4OmniMini",
-                        "sfdc_ai__DefaultBedrockAnthropicClaude45Sonnet",
-                        "sfdc_ai__DefaultAnthropicClaude35Sonnet",
-                        "sfdc_ai__DefaultAnthropicClaude35Haiku",
-                        "sfdc_ai__DefaultGoogleGemini25Pro",
-                        "sfdc_ai__DefaultGoogleGemini3Pro",
-                        "sfdc_ai__DefaultGoogleGemini15Flash"
-                    ]
-                    # Initialize widget's session state key from fallback_models if not already set
                     widget_key = f"form_fallback_{i}"
-                    if widget_key not in st.session_state and model:
-                        st.session_state[widget_key] = model
-                    # Get current value: prefer widget's session state (user selection), fallback to model from list
-                    current_value = st.session_state.get(widget_key, model) if model else ""
-                    fallback_index = fallback_options.index(current_value) if current_value and current_value in fallback_options else 0
+                    # Never use `... if model else ""` here — empty list slots must still read widget session state.
+                    if widget_key not in st.session_state:
+                        st.session_state[widget_key] = model or ""
+                    # Rely on key= for value; do not pass index= every run (that can reset sibling widgets).
                     fallback = st.selectbox(
                         f"Fallback {i+1}",
                         fallback_options,
-                        index=fallback_index,
                         key=widget_key,
                         label_visibility="collapsed",
-                        format_func=lambda x: {
-                            "sfdc_ai__DefaultOpenAIGPT5": "OpenAI GPT-5",
-                            "sfdc_ai__DefaultOpenAIGPT4": "OpenAI GPT-4",
-                            "sfdc_ai__DefaultOpenAIGPT4Turbo": "OpenAI GPT-4 Turbo",
-                            "sfdc_ai__DefaultOpenAIGPT4OmniMini": "OpenAI GPT-4 Omni Mini",
-                            "sfdc_ai__DefaultBedrockAnthropicClaude45Sonnet": "Anthropic Claude 4.5 Sonnet",
-                            "sfdc_ai__DefaultAnthropicClaude35Sonnet": "Anthropic Claude 3.5 Sonnet",
-                            "sfdc_ai__DefaultAnthropicClaude35Haiku": "Anthropic Claude 3.5 Haiku",
-                            "sfdc_ai__DefaultGoogleGemini25Pro": "Google Gemini 2.5 Pro",
-                            "sfdc_ai__DefaultGoogleGemini3Pro": "Google Gemini 3 Pro",
-                            "sfdc_ai__DefaultGoogleGemini15Flash": "Google Gemini 1.5 Flash"
-                        }.get(x, x) if x else "Select fallback model..."
+                        format_func=_fb_format,
                     )
-                    # Update session state with selected fallback (widget manages its own key, we sync to fallback_models)
+                    if i < len(st.session_state.fallback_models):
+                        st.session_state.fallback_models[i] = fallback or ""
                     if fallback:
                         fallback_models.append(fallback)
-                        # Sync widget value to fallback_models list for form submission
-                        if i < len(st.session_state.fallback_models):
-                            st.session_state.fallback_models[i] = fallback
-                        else:
-                            st.session_state.fallback_models.append(fallback)
                 with col3:
+                    st.form_submit_button(
+                        "🗑",
+                        key=f"btn_remove_fallback_{i}",
+                        on_click=remove_fallback_at,
+                        args=(i,),
+                        help="Remove this fallback row",
+                    )
                     st.markdown('</div></div>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
             # Add Fallback Model button inside the previous section to avoid spacing
@@ -1903,7 +2133,11 @@ if page == "Create New Run":
             st.markdown('<div class="config-section test-questions-section">', unsafe_allow_html=True)
             st.markdown('<h3 class="section-title test-questions-title" style="margin-bottom: 0 !important; padding-bottom: 0 !important;"><i class="bi bi-question-circle"></i> Test Questions</h3>', unsafe_allow_html=True)
             
+            pin_list = _configuration_prompt_inputs(yaml_for_template)
+            
             for i, q in enumerate(st.session_state.questions):
+                if not isinstance(q, dict):
+                    q = {"number": f"Q{i+1}", "text": "", "expectedAnswer": ""}
                 q_num_key = f"form_q_num_{i}"
                 q_text_key = f"form_q_text_{i}"
                 q_expected_key = f"form_q_expected_{i}"
@@ -1926,7 +2160,20 @@ if page == "Create New Run":
                 with col1:
                     q_num = st.text_input("Q#", value=q_num_value, key=q_num_key)
                 with col2:
-                    q_text = st.text_area("Question Text", value=q_text_value, key=q_text_key, height=80)
+                    if pin_list:
+                        st.caption("Inputs (multi-input template)")
+                        q_inputs = q.get("inputs") if isinstance(q.get("inputs"), dict) else {}
+                        for j, pin in enumerate(pin_list):
+                            if not isinstance(pin, dict):
+                                continue
+                            aname = pin.get("apiName") or pin.get("api_name") or f"input_{j}"
+                            label = pin.get("displayName") or aname
+                            inp_key = f"form_q_input_{i}_{j}"
+                            if inp_key not in st.session_state:
+                                st.session_state[inp_key] = str(q_inputs.get(aname, "") or "")
+                            st.text_input(label, key=inp_key)
+                    else:
+                        q_text = st.text_area("Question Text", value=q_text_value, key=q_text_key, height=80)
                 with col3:
                     q_expected = st.text_area("Expected Answer", value=q_expected_value, key=q_expected_key, height=80)
                 with col4:
@@ -2032,18 +2279,48 @@ if page == "Create New Run":
                 st.rerun()
             
             if submit_clicked:
-                # Collect questions from form
+                # Collect questions from form (single text or multi-input from YAML promptInputs)
                 questions_clean = []
-                for i in range(len(st.session_state.questions)):
-                    q_num_val = st.session_state.get(f"form_q_num_{i}", "")
-                    q_text_val = st.session_state.get(f"form_q_text_{i}", "")
-                    q_expected_val = st.session_state.get(f"form_q_expected_{i}", "")
-                    if q_num_val and q_text_val:
-                        questions_clean.append({
-                            "number": q_num_val,
-                            "text": q_text_val,
-                            "expectedAnswer": q_expected_val
-                        })
+                submit_pin_list = _configuration_prompt_inputs(yaml_for_template)
+                if submit_pin_list:
+                    for i in range(len(st.session_state.questions)):
+                        q_num_val = st.session_state.get(f"form_q_num_{i}", "")
+                        q_expected_val = st.session_state.get(f"form_q_expected_{i}", "")
+                        inputs_dict: Dict[str, str] = {}
+                        missing = False
+                        for j, pin in enumerate(submit_pin_list):
+                            if not isinstance(pin, dict):
+                                continue
+                            aname = pin.get("apiName") or pin.get("api_name")
+                            if not aname:
+                                continue
+                            raw = st.session_state.get(f"form_q_input_{i}_{j}", "")
+                            val = (raw or "").strip()
+                            if not val:
+                                missing = True
+                            inputs_dict[aname] = val
+                        if q_num_val and not missing and inputs_dict:
+                            questions_clean.append({
+                                "number": q_num_val,
+                                "inputs": inputs_dict,
+                                "expectedAnswer": q_expected_val,
+                            })
+                    if not questions_clean:
+                        st.error(
+                            "❌ **Each question needs a Q# and all template inputs filled** (from YAML `promptInputs`)."
+                        )
+                        st.stop()
+                else:
+                    for i in range(len(st.session_state.questions)):
+                        q_num_val = st.session_state.get(f"form_q_num_{i}", "")
+                        q_text_val = st.session_state.get(f"form_q_text_{i}", "")
+                        q_expected_val = st.session_state.get(f"form_q_expected_{i}", "")
+                        if q_num_val and q_text_val:
+                            questions_clean.append({
+                                "number": q_num_val,
+                                "text": q_text_val,
+                                "expectedAnswer": q_expected_val
+                            })
                 
                 # Build YAML config
                 config_section = {
@@ -2074,9 +2351,45 @@ if page == "Create New Run":
                 if yaml_for_template and yaml_for_template.get('configuration', {}).get('refinementStages'):
                     config_section['refinementStages'] = yaml_for_template['configuration']['refinementStages']
                 
+                # Multi-input templates: pass promptInputs through to worker (must match questions[].inputs)
+                if submit_pin_list:
+                    config_section['promptInputs'] = submit_pin_list
+                
                 # Add custom instructions if provided
                 if custom_instructions and custom_instructions.strip():
                     config_section['customInstructions'] = custom_instructions.strip()
+                
+                # Index prefix & cycle bounds (required for Playwright index pipeline; matches test_two_inputs.yaml)
+                index_prefix = (st.session_state.get("form_index_prefix") or "").strip()
+                if not index_prefix and yaml_for_template:
+                    index_prefix = (
+                        (yaml_for_template.get("configuration") or {}).get("indexPrefix") or ""
+                    ).strip()
+                if not index_prefix:
+                    st.error(
+                        "❌ **Index prefix is required.** Enter `Index prefix` above or upload a YAML that sets `configuration.indexPrefix`."
+                    )
+                    st.stop()
+                if index_prefix[0].isdigit():
+                    st.error(
+                        "❌ **Index prefix cannot start with a digit** (Salesforce developer-name rules). Use a letter first, e.g. `Heroku_MyRun`."
+                    )
+                    st.stop()
+                config_section["indexPrefix"] = index_prefix
+                try:
+                    min_c = int(st.session_state.get("form_min_cycles", 5))
+                    max_c = int(st.session_state.get("form_max_cycles", 10))
+                except (TypeError, ValueError):
+                    st.error("❌ Minimum and maximum refinement cycles must be integers.")
+                    st.stop()
+                if min_c < 1 or max_c < 1:
+                    st.error("❌ Cycle counts must be at least 1.")
+                    st.stop()
+                if min_c > max_c:
+                    st.error("❌ Minimum refinement cycles cannot exceed maximum.")
+                    st.stop()
+                config_section["minCycles"] = min_c
+                config_section["maxCycles"] = max_c
                 
                 # VALIDATION: PDFs are REQUIRED for Gemini analysis (Step 3)
                 uploaded_pdf_files = st.session_state.get('uploaded_pdf_files', [])
@@ -2295,6 +2608,8 @@ elif page == "Jobs":
             """Extract data for table row display"""
             run_id = run['run_id']
             status = run.get('status', 'unknown')
+            progress = run.get('progress', {})
+            waiting_auth = progress.get('status') in ('awaiting_mfa', 'awaiting_auth')
             
             # Get config info
             config = run.get('config', {})
@@ -2320,7 +2635,10 @@ elif page == "Jobs":
                 completed_at_str = 'In Progress' if status == 'running' else 'N/A'
             
             # Status icon and label (no duplicates)
-            if status == 'running':
+            if status == 'running' and waiting_auth:
+                status_icon = "🔐"
+                status_label = "Awaiting Auth"
+            elif status == 'running':
                 status_icon = "🔄"
                 status_label = "Running"
             elif status == 'completed':
@@ -2344,6 +2662,15 @@ elif page == "Jobs":
             output_lines = run.get('output_lines', [])
             
             # Extract step info
+            def _as_int(value, default=0):
+                """Safely coerce mixed DB/json values (e.g. '1') to int."""
+                try:
+                    if value is None or value == "":
+                        return default
+                    return int(value)
+                except (TypeError, ValueError):
+                    return default
+
             def extract_status_from_logs(output_lines):
                 if not output_lines:
                     return None, None, None
@@ -2365,8 +2692,8 @@ elif page == "Jobs":
                 return step_num, cycle_num, None
             
             step_num, cycle_from_log, _ = extract_status_from_logs(output_lines)
-            current_cycle = progress.get('cycle') or cycle_from_log or 0
-            current_step = progress.get('step') or step_num or 0
+            current_cycle = _as_int(progress.get('cycle'), _as_int(cycle_from_log, 0))
+            current_step = _as_int(progress.get('step'), _as_int(step_num, 0))
             
             step_names = {
                 1: 'Updating Search Index',
@@ -2374,7 +2701,12 @@ elif page == "Jobs":
                 3: 'Analyzing Results with Gemini'
             }
             
-            if status == 'running' and current_step > 0:
+            if status == 'running' and waiting_auth:
+                if progress.get('status') == 'awaiting_auth':
+                    current_step_display = "Waiting for Auth Org login"
+                else:
+                    current_step_display = "Waiting for MFA code input"
+            elif status == 'running' and current_step > 0:
                 current_step_display = f"Cycle {current_cycle} - Step {current_step}/3: {step_names.get(current_step, f'Step {current_step}')}"
             elif status == 'running' and current_cycle > 0:
                 current_step_display = f"Cycle {current_cycle} - Initializing"
@@ -2470,6 +2802,21 @@ elif page == "Jobs":
                             st.rerun()
                         else:
                             st.error(f"❌ Failed to kill job {run_id}")
+                    run_progress = run.get('progress', {}) or {}
+                    if run_progress.get('status') == 'awaiting_mfa':
+                        if st.button("🔐 Enter MFA", key=f"mfa_{run_id}", use_container_width=True):
+                            open_mfa_modal(run_id)
+                            st.rerun()
+                    if run_progress.get('status') == 'awaiting_auth':
+                        auth_url = (
+                            (run.get('checkpoint_info', {}) or {}).get('auth_org_url')
+                            or f"{run.get('config', {}).get('configuration', {}).get('salesforce', {}).get('instanceUrl', '').rstrip('/')}/lightning/page/home"
+                        )
+                        if auth_url and auth_url.startswith("http"):
+                            if hasattr(st, "link_button"):
+                                st.link_button("🔐 Auth Org", auth_url, use_container_width=True)
+                            else:
+                                st.markdown(f"[🔐 Auth Org]({auth_url})")
                 else:
                     st.markdown("—")
             
@@ -2550,10 +2897,10 @@ elif page == "Jobs":
                 stage_name = refinement_stage_names.get(refinement_stage, 'LLM Refinement')
                 
                 # Use cycle from progress or logs
-                current_cycle = progress.get('cycle') or cycle_from_log or 0
+                current_cycle = _as_int(progress.get('cycle'), _as_int(cycle_from_log, 0))
                 
                 # Get current step
-                current_step = progress.get('step') or step_num or 0
+                current_step = _as_int(progress.get('step'), _as_int(step_num, 0))
                 
                 # Step names and descriptions
                 step_names = {
@@ -2566,7 +2913,15 @@ elif page == "Jobs":
                 job_status = run.get('status', 'unknown')
                 
                 # Build detailed status text
-                if job_status == 'running' and progress.get('status') == 'starting':
+                if progress.get('status') == 'awaiting_mfa':
+                    status_icon = "🔐"
+                    status_text = "Awaiting MFA verification code"
+                    status_message = progress.get('message') or "Submit code from Jobs table to resume."
+                elif progress.get('status') == 'awaiting_auth':
+                    status_icon = "🔐"
+                    status_text = "Awaiting Auth Org login"
+                    status_message = progress.get('message') or "Use the Auth Org action in Jobs table to authenticate and resume."
+                elif job_status == 'running' and progress.get('status') == 'starting':
                     status_text = "Initializing workflow..."
                 elif progress.get('status') == 'cycle_start':
                     status_text = f"Cycle {current_cycle} - Starting"
@@ -2626,7 +2981,7 @@ elif page == "Jobs":
                             st.error(f"**Error Details:** {error_details}")
                         # Show which step failed if available
                         if progress.get('step'):
-                            failed_step = progress.get('step')
+                            failed_step = _as_int(progress.get('step'), 0)
                             step_name = step_names.get(failed_step, f'Step {failed_step}')
                             st.error(f"**Failed at:** Cycle {current_cycle} - {step_name}")
                     else:
@@ -2682,7 +3037,7 @@ elif page == "Jobs":
                             st.caption(time_message)
                             
                             # Show note about index update taking up to an hour (only for Step 1)
-                            current_step = progress.get('step', 0)
+                            current_step = _as_int(progress.get('step'), 0)
                             if current_step == 1:
                                 st.info("ℹ️ **Note:** The index update stage (Step 1) can take up to an hour. Please be patient.")
                             
@@ -2718,7 +3073,8 @@ elif page == "Jobs":
                         st.info(f"ℹ️ Starting Cycle {current_cycle}...")
                     elif progress.get('step'):
                         step_names = {1: 'Updating Search Index', 2: 'Testing Index', 3: 'Analyzing Results'}
-                        step_name = step_names.get(progress.get('step'), f'Step {progress.get("step")}')
+                        progress_step = _as_int(progress.get('step'), 0)
+                        step_name = step_names.get(progress_step, f'Step {progress_step}')
                         st.info(f"ℹ️ Running Cycle {current_cycle} - {step_name}...")
                     else:
                         st.info("ℹ️ Workflow is running. Output will appear here as progress updates are received.")
@@ -2726,7 +3082,7 @@ elif page == "Jobs":
                 # Show additional progress details
                 if current_cycle > 0:
                     # Determine current step from progress or parsed logs
-                    current_step = progress.get('step') or step_num
+                    current_step = _as_int(progress.get('step'), _as_int(step_num, 0))
                     step_names_display = {1: 'Update Index', 2: 'Test Index', 3: 'Analyze Results'}
                     
                     if current_step and current_step > 0:
@@ -2754,6 +3110,44 @@ elif page == "Jobs":
                             )
                     else:
                         st.warning(f"⚠️ File not found at: {excel_file}")
+        # MFA modal (rendered when user clicks "Enter MFA")
+        selected_mfa_run = st.session_state.get('show_mfa_modal_for')
+        if selected_mfa_run:
+            if hasattr(st, "dialog"):
+                @st.dialog("Enter MFA Verification Code")
+                def _mfa_dialog():
+                    st.caption(f"Run: `{selected_mfa_run}`")
+                    st.write("Enter the one-time verification code from Salesforce.")
+                    with st.form(f"mfa_form_{selected_mfa_run}", clear_on_submit=True):
+                        mfa_code = st.text_input("Verification code", type="password", key=f"mfa_code_input_{selected_mfa_run}")
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            submit = st.form_submit_button("Submit code", type="primary", use_container_width=True)
+                        with col_b:
+                            cancel = st.form_submit_button("Cancel", use_container_width=True)
+                        if submit:
+                            if submit_mfa_code_for_run(selected_mfa_run, mfa_code):
+                                st.success("Code submitted. Worker will resume if valid.")
+                                close_mfa_modal()
+                                st.rerun()
+                            else:
+                                st.error("Failed to submit code. Try again.")
+                        if cancel:
+                            close_mfa_modal()
+                            st.rerun()
+
+                _mfa_dialog()
+            else:
+                st.warning("Your Streamlit version does not support dialog modals. Use the latest Streamlit for MFA modal support.")
+                with st.form(f"mfa_form_inline_{selected_mfa_run}", clear_on_submit=True):
+                    mfa_code = st.text_input("Verification code", type="password", key=f"mfa_inline_{selected_mfa_run}")
+                    if st.form_submit_button("Submit code", type="primary"):
+                        if submit_mfa_code_for_run(selected_mfa_run, mfa_code):
+                            st.success("Code submitted.")
+                            close_mfa_modal()
+                            st.rerun()
+                        else:
+                            st.error("Failed to submit code.")
     else:
         st.info("ℹ️ No jobs found. Click 'Create New Run' to start a workflow.")
 

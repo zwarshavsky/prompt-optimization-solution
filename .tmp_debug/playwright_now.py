@@ -299,21 +299,9 @@ async def update_search_index_prompt(
     
     async with async_playwright() as p:
         # Launch browser with visible window - normal size
-        launch_args = {}
-        if headless:
-            # Required args for headless Chromium on Heroku/Linux containers
-            launch_args['args'] = [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--disable-extensions'
-            ]
         browser = await p.chromium.launch(
             headless=headless,
-            slow_mo=slow_mo,  # Delay between actions in milliseconds (0 = no delay)
-            **launch_args
+            slow_mo=slow_mo  # Delay between actions in milliseconds (0 = no delay)
         )
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 720}  # Normal resolution
@@ -2117,18 +2105,7 @@ async def _create_search_index_ui(
     base = instance_url.rstrip("/")
     login_url = "https://login.salesforce.com" if "salesforce.com" in base else base
     async with async_playwright() as p:
-        launch_args = {'slow_mo': 100}
-        if headless:
-            # Required args for headless Chromium on Heroku/Linux containers
-            launch_args['args'] = [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--disable-extensions'
-            ]
-        browser = await p.chromium.launch(headless=headless, **launch_args)
+        browser = await p.chromium.launch(headless=headless, slow_mo=100)
         # Optional browser session bootstrap from env (captured Playwright storageState).
         # Useful for Heroku/headless runs where interactive login isn't possible each run.
         storage_state = None
@@ -2141,7 +2118,7 @@ async def _create_search_index_ui(
             print(f"   [create_index] ⚠️ Could not decode SF_AUTH_STATE_B64: {e}", flush=True)
             storage_state = None
 
-        context = await browser.new_context(viewport={"width": 1400, "height": 900}, storage_state=storage_state)
+        context = await browser.new_context(viewport={"width": 1280, "height": 720}, storage_state=storage_state)
         page = await context.new_page()
         if should_abort():
             print("   ⚠️ DIAG: Abort at start (before login)", flush=True)
@@ -2157,7 +2134,7 @@ async def _create_search_index_ui(
             print(f"   [create_index] ✅ Session restore worked. URL: {current_url}", flush=True)
         else:
             print("   [create_index] Logging in...", flush=True)
-            await page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+            await page.goto(login_url, wait_until="networkidle", timeout=60000)
             await page.get_by_role("textbox", name="Username").fill(username)
             await page.get_by_role("textbox", name="Password").fill(password)
             await page.get_by_role("button", name="Log In").click()
@@ -2179,48 +2156,6 @@ async def _create_search_index_ui(
             print(f"   ❌ Login did not reach authenticated URL. Current URL: {current_url}", flush=True)
             await browser.close()
             return (None, None)
-        lightning_base = base.replace(".my.salesforce.com", ".lightning.force.com")
-
-        # Force an authenticated Lightning app-context handoff when possible.
-        # This mitigates session restore landing on non-app login contexts.
-        if access_token:
-            frontdoor_candidates = [
-                f"{lightning_base}/secur/frontdoor.jsp?sid={access_token}&retURL=%2Flightning%2Fo%2FDataSemanticSearch%2Flist%3FfilterName%3D__Recent",
-                f"{base}/secur/frontdoor.jsp?sid={access_token}&retURL=%2Flightning%2Fo%2FDataSemanticSearch%2Flist%3FfilterName%3D__Recent",
-            ]
-            for fdc in frontdoor_candidates:
-                try:
-                    await page.goto(fdc, wait_until="domcontentloaded", timeout=60000)
-                    await asyncio.sleep(1.0)
-                    fd_url = page.url
-                    new_btn_probe = page.get_by_role("button", name="New")
-                    if await new_btn_probe.count() > 0:
-                        print(f"   [create_index] frontdoor selected (New visible): {fd_url}", flush=True)
-                        break
-                    print(f"   [create_index] frontdoor landed without New: {fd_url}", flush=True)
-                except Exception as e:
-                    print(f"   [create_index] frontdoor candidate failed: {fdc} err={e}", flush=True)
-
-        # Prefer object-list candidates where New button is rendered deterministically.
-        setup_candidates = [
-            f"{lightning_base}/lightning/o/DataSemanticSearch/list?filterName=__Recent",
-            f"{lightning_base}/lightning/o/DataSemanticSearch/home",
-            f"{base}/lightning/o/DataSemanticSearch/list?filterName=__Recent",
-            f"{base}/lightning/o/DataSemanticSearch/home",
-            setup_url,
-        ]
-        for cand in setup_candidates:
-            try:
-                await page.goto(cand, wait_until="domcontentloaded", timeout=60000)
-                await asyncio.sleep(1.0)
-                cur = page.url
-                new_btn_probe = page.get_by_role("button", name="New")
-                if await new_btn_probe.count() > 0:
-                    print(f"   [create_index] object-list candidate selected (New visible): {cur}", flush=True)
-                    break
-            except Exception:
-                continue
-
         if should_abort():
             print("   ⚠️ DIAG: Abort after login, before Search Indexes", flush=True)
             await browser.close()
@@ -2244,253 +2179,25 @@ async def _create_search_index_ui(
         print("   [create_index] Waiting for New button...", flush=True)
         new_btn = page.get_by_role("button", name="New")
         opened_new_flow_direct = False
-        new_button_clicked = False
         try:
             await new_btn.wait_for(state="visible", timeout=12000)
-            await new_btn.click()
-            new_button_clicked = True
-            print("   [create_index] New button clicked (visible)", flush=True)
         except Exception:
             print("   [create_index] 'New' not visible on current page; trying SearchIndex list fallback URL...", flush=True)
             # Fallback: go straight to the SearchIndex object list view where "New" is rendered.
             await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(3.0)
-            # Check if we got redirected to login page (session expired)
-            page_title = await page.title()
-            if "Login" in page_title or "/login" in page.url.lower():
-                print(f"   [create_index] ⚠️ Redirected to login page! Session expired. Re-authenticating...", flush=True)
-                # Re-login
-                username_field = page.get_by_role("textbox", name="Username")
-                await username_field.wait_for(state="visible", timeout=10000)
-                await username_field.fill(username)
-                password_field = page.get_by_role("textbox", name="Password")
-                await password_field.fill(password)
-                # Wait a moment for form validation
-                await asyncio.sleep(0.5)
-                login_button = page.get_by_role("button", name="Log In")
-                await login_button.wait_for(state="visible", timeout=5000)
-                print(f"   [create_index] 🔑 Clicking Login button and waiting for navigation...", flush=True)
-                # Click and wait for navigation to complete
-                try:
-                    async with page.expect_navigation(timeout=30000):
-                        await login_button.click()
-                    print(f"   [create_index] ✅ Login navigation completed", flush=True)
-                except Exception as nav_err:
-                    print(f"   [create_index] ⚠️ Navigation timeout or error: {nav_err}", flush=True)
-                    print(f"   [create_index] Current page: {await page.title()} at {page.url}", flush=True)
-
-                # Check if login actually succeeded
-                await asyncio.sleep(1)
-                current_title = await page.title()
-                current_url = page.url
-                if "Login" in current_title or "/login" in current_url.lower():
-                    print(f"   [create_index] ❌ Login FAILED - still on login page after submission", flush=True)
-                    print(f"   [create_index] Title: {current_title}, URL: {current_url}", flush=True)
-                    print(f"   [create_index] Possible causes: Wrong credentials (SF_PASSWORD), CAPTCHA, MFA required, or account locked", flush=True)
-                    # Take screenshot for debugging
-                    try:
-                        screenshot_path = f"/tmp/login_failed_{run_id}.png"
-                        await page.screenshot(path=screenshot_path, full_page=True)
-                        print(f"   [create_index] 📸 Login failure screenshot: {screenshot_path}", flush=True)
-                    except Exception:
-                        pass
-                    await browser.close()
-                    return (None, None)
-
-                print(f"   [create_index] ✅ Login succeeded! Now on: {current_title}", flush=True)
-                # Now navigate to SearchIndex list
-                await page.goto(f"{base}/lightning/o/SearchIndex/list", wait_until="domcontentloaded", timeout=60000)
-                await asyncio.sleep(3.0)
-                # Log page state after re-auth
-                page_title_after = await page.title()
-                visible_buttons_after = await page.evaluate("""() => {
-                    const buttons = Array.from(document.querySelectorAll('button, a'));
-                    return buttons.slice(0, 30).map(b => ({
-                        tag: b.tagName,
-                        text: b.textContent?.trim().substring(0, 50),
-                        title: b.getAttribute('title'),
-                        name: b.getAttribute('name'),
-                        visible: b.offsetParent !== null
-                    })).filter(b => b.visible || b.title || b.text);
-                }""")
-                print(f"   [create_index] ✅ Re-authenticated. Page: {page_title_after}", flush=True)
-                print(f"   [create_index] 🔘 Visible elements after re-auth: {visible_buttons_after}", flush=True)
+            await asyncio.sleep(1.5)
             try:
                 await new_btn.wait_for(state="visible", timeout=12000)
-                await new_btn.click()
-                new_button_clicked = True
-                print("   [create_index] New button clicked at list URL (visible)", flush=True)
             except Exception:
-                # Try comprehensive JavaScript search including shadow DOM
-                print("   [create_index] 'New' still not visible; trying comprehensive JS search...", flush=True)
-                js_new_clicked = await page.evaluate("""() => {
-                    // Search in main DOM and all shadow roots
-                    function findInShadowDOM(root, selector) {
-                        if (!root) return null;
-
-                        // Try direct query
-                        let el = root.querySelector(selector);
-                        if (el) return el;
-
-                        // Recursively search shadow roots
-                        const allElements = root.querySelectorAll('*');
-                        for (const element of allElements) {
-                            if (element.shadowRoot) {
-                                el = findInShadowDOM(element.shadowRoot, selector);
-                                if (el) return el;
-                            }
-                        }
-                        return null;
-                    }
-
-                    // Try multiple selectors (only valid CSS selectors for querySelector)
-                    const selectors = [
-                        'button[title="New"]',
-                        'a[title="New"]'
-                    ];
-
-                    for (const sel of selectors) {
-                        const btn = findInShadowDOM(document, sel);
-                        if (btn) {
-                            btn.scrollIntoView();
-                            btn.click();
-                            return true;
-                        }
-                    }
-
-                    // Fallback: find any button/link with "New" text
-                    const allElements = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
-                    for (const el of allElements) {
-                        const text = (el.textContent || el.innerText || '').trim();
-                        const title = el.getAttribute('title') || '';
-                        if ((text === 'New' || title === 'New') && !el.disabled) {
-                            el.scrollIntoView();
-                            el.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                }""")
-                if js_new_clicked:
-                    new_button_clicked = True
-                    print("   [create_index] New button clicked via comprehensive JS search", flush=True)
-                    await asyncio.sleep(1.5)
-                else:
-                    print("   [create_index] New button not found anywhere; trying JS click from object home...", flush=True)
-                    # Navigate to object home and try JS click
-                    try:
-                        await page.goto(f"{base}/lightning/o/SearchIndex/home", wait_until="domcontentloaded", timeout=60000)
-                        await asyncio.sleep(2.0)
-
-                        # Try to click New via JavaScript, including shadow DOM search
-                        js_new_clicked_home = await page.evaluate("""() => {
-                            function findNewButton(root) {
-                                if (!root) return null;
-
-                                // Try standard selectors
-                                let btn = root.querySelector('button[title="New"]');
-                                if (btn && btn.offsetParent) return btn;
-
-                                // Search shadow roots
-                                const elements = root.querySelectorAll('*');
-                                for (const el of elements) {
-                                    if (el.shadowRoot) {
-                                        btn = findNewButton(el.shadowRoot);
-                                        if (btn) return btn;
-                                    }
-                                }
-
-                                // Fallback: any visible button with "New" text
-                                const buttons = root.querySelectorAll('button, a, div[role="button"]');
-                                for (const b of buttons) {
-                                    if (b.offsetParent && ((b.textContent || '').trim() === 'New' || b.getAttribute('title') === 'New')) {
-                                        return b;
-                                    }
-                                }
-                                return null;
-                            }
-
-                            const newBtn = findNewButton(document);
-                            if (newBtn) {
-                                newBtn.scrollIntoView();
-                                newBtn.click();
-                                return true;
-                            }
-                            return false;
-                        }""")
-
-                        if js_new_clicked_home:
-                            new_button_clicked = True
-                            print("   [create_index] New button clicked via JS from object home", flush=True)
-                            await asyncio.sleep(2.0)
-                        else:
-                            print("   [create_index] JS click failed; falling back to direct URL...", flush=True)
-                            await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
-                            print("   [create_index] Waiting 30s for wizard LWC to load...", flush=True)
-                            await asyncio.sleep(30.0)
-                            opened_new_flow_direct = True
-                    except Exception as home_err:
-                        print(f"   [create_index] Object home approach failed: {home_err}", flush=True)
-                        print("   [create_index] Falling back to direct URL...", flush=True)
-                        await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
-                        print("   [create_index] Waiting 30s for wizard LWC to load...", flush=True)
-                        await asyncio.sleep(30.0)
-                        opened_new_flow_direct = True
-                    # Check if we got redirected to login page again
-                    page_title = await page.title()
-                    if "Login" in page_title or "/login" in page.url.lower():
-                        print(f"   [create_index] ⚠️ Redirected to login on /new URL! Re-authenticating...", flush=True)
-                        # Re-login
-                        username_field = page.get_by_role("textbox", name="Username")
-                        await username_field.wait_for(state="visible", timeout=10000)
-                        await username_field.fill(username)
-                        password_field = page.get_by_role("textbox", name="Password")
-                        await password_field.fill(password)
-                        # Wait a moment for form validation
-                        await asyncio.sleep(0.5)
-                        login_button = page.get_by_role("button", name="Log In")
-                        await login_button.wait_for(state="visible", timeout=5000)
-                        print(f"   [create_index] 🔑 Clicking Login button and waiting for navigation...", flush=True)
-                        # Click and wait for navigation to complete
-                        try:
-                            async with page.expect_navigation(timeout=30000):
-                                await login_button.click()
-                            print(f"   [create_index] ✅ Login navigation completed", flush=True)
-                        except Exception as nav_err:
-                            print(f"   [create_index] ⚠️ Navigation timeout or error: {nav_err}", flush=True)
-                            print(f"   [create_index] Current page: {await page.title()} at {page.url}", flush=True)
-
-                        # Check if login actually succeeded
-                        await asyncio.sleep(1)
-                        current_title_after_login = await page.title()
-                        current_url_after_login = page.url
-                        if "Login" in current_title_after_login or "/login" in current_url_after_login.lower():
-                            print(f"   [create_index] ❌ Login FAILED - still on login page after submission", flush=True)
-                            print(f"   [create_index] Title: {current_title_after_login}, URL: {current_url_after_login}", flush=True)
-                            print(f"   [create_index] Possible causes: Wrong credentials (SF_PASSWORD), CAPTCHA, MFA required, or account locked", flush=True)
-                            # Take screenshot for debugging
-                            try:
-                                screenshot_path = f"/tmp/login_failed_new_{run_id}.png"
-                                await page.screenshot(path=screenshot_path, full_page=True)
-                                print(f"   [create_index] 📸 Login failure screenshot: {screenshot_path}", flush=True)
-                            except Exception:
-                                pass
-                            await browser.close()
-                            return (None, None)
-
-                        print(f"   [create_index] ✅ Login succeeded! Now on: {current_title_after_login}", flush=True)
-                        # Navigate back to SearchIndex new
-                        await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
-                        await asyncio.sleep(2)
-                        print(f"   [create_index] ✅ Re-authenticated and navigated to SearchIndex /new", flush=True)
+                print("   [create_index] 'New' still not visible; opening SearchIndex new-record URL directly...", flush=True)
+                await page.goto(f"{base}/lightning/o/SearchIndex/new", wait_until="domcontentloaded", timeout=60000)
+                await asyncio.sleep(1.0)
+                opened_new_flow_direct = True
         print("   [create_index] New→Advanced Setup→Next (builder popup)...", flush=True)
-        print(f"   [create_index] Current page URL before Advanced Setup: {page.url}", flush=True)
-        if new_button_clicked:
+        if not opened_new_flow_direct:
+            await new_btn.click()
             await asyncio.sleep(0.5)
         advanced_clicked = False
-        if new_button_clicked:
-            # Give the dialog time to appear after clicking New
-            await asyncio.sleep(1.0)
         advanced_candidates = [
             page.get_by_text("Advanced Setup", exact=True),
             page.get_by_text("Advanced setup", exact=True),
@@ -2500,72 +2207,14 @@ async def _create_search_index_ui(
         ]
         for cand in advanced_candidates:
             try:
-                if await cand.is_visible(timeout=30000):
-                    await cand.click(timeout=30000)
+                if await cand.is_visible(timeout=2500):
+                    await cand.click(timeout=8000)
                     advanced_clicked = True
-                    print("   [create_index] Advanced Setup clicked", flush=True)
                     break
             except Exception:
                 pass
-        if not advanced_clicked and new_button_clicked:
-            # Try JavaScript click for Advanced Setup
-            js_advanced_clicked = await page.evaluate("""() => {
-                const elements = Array.from(document.querySelectorAll('button, a, span, div'));
-                const advBtn = elements.find(el => {
-                    const text = (el.textContent || el.innerText || '').trim();
-                    return text.toLowerCase().includes('advanced') && text.toLowerCase().includes('setup');
-                });
-                if (advBtn) {
-                    advBtn.click();
-                    return true;
-                }
-                return false;
-            }""")
-            if js_advanced_clicked:
-                advanced_clicked = True
-                print("   [create_index] Advanced Setup clicked via JavaScript", flush=True)
-                await asyncio.sleep(0.5)
         if not advanced_clicked:
             print("   [create_index] ⚠️ Advanced Setup control not found; continuing to Next fallback.", flush=True)
-
-        # If we opened via direct URL and didn't find Advanced Setup, diagnose what's on page
-        if opened_new_flow_direct and not advanced_clicked:
-            print("   [create_index] ❌ Direct URL navigation failed - no Advanced Setup dialog found", flush=True)
-
-            # DIAGNOSTICS: Capture page state
-            page_title = await page.title()
-            page_url = page.url
-            print(f"   [create_index] 📊 DIAGNOSTICS:", flush=True)
-            print(f"   [create_index]    Title: {page_title}", flush=True)
-            print(f"   [create_index]    URL: {page_url}", flush=True)
-
-            # Get visible buttons/elements
-            try:
-                visible_elements = await page.evaluate("""() => {
-                    const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
-                    return buttons.slice(0, 30).map(el => ({
-                        tag: el.tagName,
-                        text: (el.textContent || '').trim().substring(0, 60),
-                        title: el.getAttribute('title'),
-                        visible: el.offsetParent !== null
-                    })).filter(el => el.visible || el.title);
-                }""")
-                print(f"   [create_index]    Visible elements: {visible_elements[:10]}", flush=True)
-            except Exception as e:
-                print(f"   [create_index]    Could not get elements: {e}", flush=True)
-
-            # Take screenshot
-            try:
-                screenshot_path = f"/tmp/no_advanced_setup_{run_id}.png"
-                await page.screenshot(path=screenshot_path, full_page=True)
-                print(f"   [create_index]    📸 Screenshot: {screenshot_path}", flush=True)
-            except Exception as e:
-                print(f"   [create_index]    Screenshot failed: {e}", flush=True)
-
-            print("   [create_index] Page may not have loaded wizard. Aborting to avoid wrong page navigation.", flush=True)
-            await browser.close()
-            return (None, None)
-
         await asyncio.sleep(0.3)
         next_clicked = False
         next_candidates = [
@@ -2604,377 +2253,22 @@ async def _create_search_index_ui(
             builder = page
         await builder.wait_for_load_state("domcontentloaded")
         await asyncio.sleep(1)
-        builder_url = builder.url
-        print(f"   [create_index] Builder opened at URL: {builder_url}", flush=True)
-        print("   [create_index] Builder opened. Hybrid + RagFileUDMO... [baseline_resilient]", flush=True)
-        searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
-        try:
-            await searchbox.wait_for(state="visible", timeout=7000)
-            print("   [create_index] searchbox visible without Hybrid click.", flush=True)
-        except Exception:
-            hybrid_candidates = [
-                builder.get_by_role("radio", name=re.compile("hybrid", re.IGNORECASE)).first,
-                builder.get_by_role("button", name=re.compile("hybrid", re.IGNORECASE)).first,
-                builder.get_by_text("Hybrid search", exact=False).first,
-                builder.get_by_text("Hybrid Search", exact=False).first,
-            ]
-            hybrid_clicked = False
-            for cand in hybrid_candidates:
-                try:
-                    if await cand.count() > 0:
-                        await cand.first.wait_for(state="visible", timeout=4000)
-                        await cand.first.click(timeout=6000)
-                        hybrid_clicked = True
-                        break
-                except Exception:
-                    pass
-            if not hybrid_clicked:
-                js_clicked = await builder.evaluate("""() => {
-                    const roots = [document];
-                    const seen = new Set([document]);
-                    const stack = [document];
-                    while (stack.length) {
-                        const root = stack.pop();
-                        if (!root || !root.querySelectorAll) continue;
-                        root.querySelectorAll('*').forEach((el) => {
-                            if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-                                seen.add(el.shadowRoot);
-                                roots.push(el.shadowRoot);
-                                stack.push(el.shadowRoot);
-                            }
-                        });
-                    }
-                    const isVisible = (el) => {
-                        const r = el.getBoundingClientRect();
-                        const s = window.getComputedStyle(el);
-                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-                    };
-                    const hybridish = [];
-                    for (const r of roots) {
-                        if (!r.querySelectorAll) continue;
-                        r.querySelectorAll('button,[role="button"],[role="radio"],label,span,div').forEach((el) => {
-                            const t = ((el.innerText || el.textContent || '') + '').trim().toLowerCase();
-                            if (t.includes('hybrid')) hybridish.push(el);
-                        });
-                    }
-                    for (const el of hybridish) {
-                        if (!isVisible(el)) continue;
-                        try { el.click(); return true; } catch (_) {}
-                    }
-                    return false;
-                }""")
-                print(f"   [create_index] hybrid js_click={js_clicked}", flush=True)
-                await asyncio.sleep(0.6)
-            searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
-            broad_search = builder.locator(
-                "input[placeholder*='Search data model objects']:not([tabindex='-1']), "
-                "input[placeholder*='Search Data Model Objects']:not([tabindex='-1']), "
-                "input[type='search']:not([tabindex='-1']), "
-                "[role='searchbox']:not([tabindex='-1'])"
-            ).first
-            try:
-                await searchbox.wait_for(state="visible", timeout=10000)
-                await searchbox.fill("rag")
-            except Exception:
-                try:
-                    await broad_search.wait_for(state="visible", timeout=10000)
-                    await broad_search.fill("rag")
-                except Exception:
-                    # Last-resort: locate a visible searchable input in DOM/shadow DOM and set value via JS.
-                    js_search_filled = await builder.evaluate("""() => {
-                        const roots = [document];
-                        const seen = new Set([document]);
-                        const stack = [document];
-                        while (stack.length) {
-                            const root = stack.pop();
-                            if (!root || !root.querySelectorAll) continue;
-                            root.querySelectorAll('*').forEach((el) => {
-                                if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-                                    seen.add(el.shadowRoot);
-                                    roots.push(el.shadowRoot);
-                                    stack.push(el.shadowRoot);
-                                }
-                            });
-                        }
-                        const isVisible = (el) => {
-                            const r = el.getBoundingClientRect();
-                            const s = window.getComputedStyle(el);
-                            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-                        };
-                        for (const r of roots) {
-                            if (!r.querySelectorAll) continue;
-                            const candidates = r.querySelectorAll("input[type='search'], input[placeholder*='Search data model objects'], input[placeholder*='Search Data Model Objects'], [role='searchbox']");
-                            for (const el of candidates) {
-                                const tabindex = (el.getAttribute('tabindex') || '').trim();
-                                if (tabindex === '-1') continue;
-                                if (!isVisible(el)) continue;
-                                try {
-                                    el.focus();
-                                    el.value = 'rag';
-                                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                                    return true;
-                                } catch (_) {}
-                            }
-                        }
-                        return false;
-                    }""")
-                    print(f"   [create_index] js search fill fallback={js_search_filled}", flush=True)
-                    if not js_search_filled:
-                        # Some org variants do not expose a usable searchbox in this step.
-                        # Continue and attempt direct row selection below.
-                        page_title = await builder.title()
-                        page_url = builder.url
-                        print(f"   [create_index] ⚠️ No usable searchbox found; proceeding with direct DMO row lookup.", flush=True)
-                        print(f"   [create_index] DIAG: Page title='{page_title}', URL={page_url}", flush=True)
-            await asyncio.sleep(0.3)
-        else:
-            await searchbox.fill("rag")
-        await asyncio.sleep(2.5)
-        row_with_dmo = builder.locator("tr,li,div,[role='row']").filter(has_text=re.compile(r"rag\\s*file\\s*udmo|ragfileudmo", re.I))
-        row_selected_via_js = False
-        row_selected_via_locator = False
-        row_selected_via_keyboard = False
-        try:
-            await row_with_dmo.first.wait_for(state="visible", timeout=15000)
-        except Exception:
-            # Fallback for variants that render rows in non-table containers or shadow roots.
-            js_row_clicked = await builder.evaluate("""() => {
-                const roots = [document];
-                const seen = new Set([document]);
-                const stack = [document];
-                while (stack.length) {
-                    const root = stack.pop();
-                    if (!root || !root.querySelectorAll) continue;
-                    root.querySelectorAll('*').forEach((el) => {
-                        if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-                            seen.add(el.shadowRoot);
-                            roots.push(el.shadowRoot);
-                            stack.push(el.shadowRoot);
-                        }
-                    });
-                }
-                const isVisible = (el) => {
-                    const r = el.getBoundingClientRect();
-                    const s = window.getComputedStyle(el);
-                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-                };
-                for (const r of roots) {
-                    if (!r.querySelectorAll) continue;
-                    const candidates = r.querySelectorAll("tr,li,div,[role='row']");
-                    for (const el of candidates) {
-                        const txt = ((el.innerText || el.textContent || "") + "").toLowerCase();
-                        if (!(txt.includes("ragfileudmo") || txt.includes("rag file udmo") || (txt.includes("rag") && txt.includes("udmo")))) continue;
-                        if (!isVisible(el)) continue;
-                        const radio = el.querySelector("input[type='radio'], [role='radio'], label, .slds-radio__label");
-                        try {
-                            (radio || el).click();
-                            return true;
-                        } catch (_) {}
-                    }
-                }
-                return false;
-            }""")
-            print(f"   [create_index] js row select fallback={js_row_clicked}", flush=True)
-            if not js_row_clicked:
-                print("   [create_index] ⚠️ RagFileUDMO row not directly selectable; attempting locator row/radio selection next.", flush=True)
-            # IMPORTANT: only treat JS row selection as successful when it actually clicked.
-            row_selected_via_js = bool(js_row_clicked)
-        if not row_selected_via_js:
-            try:
-                await row_with_dmo.locator("label.slds-radio__label, .slds-radio__label").first.click(timeout=12000)
-                # CRITICAL: Wait for Lightning to process the selection (headless mode needs extra time)
-                await asyncio.sleep(1.5)
-                row_selected_via_locator = True
-            except Exception:
-                try:
-                    await row_with_dmo.locator("input[type='radio'], [role='radio']").first.click(force=True, timeout=8000)
-                    # CRITICAL: Wait for Lightning to process the selection (headless mode needs extra time)
-                    await asyncio.sleep(1.5)
-                    row_selected_via_locator = True
-                except Exception:
-                    print("   [create_index] ⚠️ Locator row click failed; attempting Next fallback.", flush=True)
-        # In some Salesforce datatable variants, Playwright locator click cannot focus/select the row.
-        # Use a JS fallback that traverses shadow roots and performs focus + keyboard activation in-page.
-        if not (row_selected_via_js or row_selected_via_locator):
-            row_selected_via_keyboard = await builder.evaluate("""() => {
-                const roots = [document];
-                const seen = new Set([document]);
-                const stack = [document];
-                while (stack.length) {
-                    const root = stack.pop();
-                    if (!root || !root.querySelectorAll) continue;
-                    root.querySelectorAll('*').forEach((el) => {
-                        if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-                            seen.add(el.shadowRoot);
-                            roots.push(el.shadowRoot);
-                            stack.push(el.shadowRoot);
-                        }
-                    });
-                }
-                const isVisible = (el) => {
-                    const r = el.getBoundingClientRect();
-                    const s = window.getComputedStyle(el);
-                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-                };
-                const isRagRow = (el) => {
-                    const txt = ((el.innerText || el.textContent || "") + "").toLowerCase();
-                    return txt.includes("ragfileudmo") || txt.includes("rag file udmo") || (txt.includes("rag") && txt.includes("udmo"));
-                };
-                const press = (target, key) => {
-                    try {
-                        target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
-                        target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true }));
-                    } catch (_) {}
-                };
-                for (const r of roots) {
-                    if (!r.querySelectorAll) continue;
-                    const rows = r.querySelectorAll("tr,li,div,[role='row']");
-                    for (const row of rows) {
-                        if (!isRagRow(row) || !isVisible(row)) continue;
-                        const clickable = row.querySelector("input[type='radio'], [role='radio'], label, .slds-radio__label") || row;
-                        try { clickable.click(); } catch (_) {}
-                        try { row.focus(); } catch (_) {}
-                        press(row, 'Enter');
-                        press(row, ' ');
-                        const checkedInside = row.querySelector("input[type='radio']:checked, [role='radio'][aria-checked='true']");
-                        const ariaSelected = row.getAttribute("aria-selected") === "true";
-                        if (checkedInside || ariaSelected) return true;
-                    }
-                }
-                return false;
-            }""")
-            print(f"   [create_index] js keyboard row selection fallback={row_selected_via_keyboard}", flush=True)
-
-        # CRITICAL: Give Lightning extra time to process selection in headless mode, then verify
-        # Retry verification up to 3 times with delays (Lightning may need time to update DOM)
-        dmo_selected_confirmed = False
-        for verify_attempt in range(3):
-            if verify_attempt > 0:
-                await asyncio.sleep(1.0)  # Wait before retry
-            dmo_selected_confirmed = await builder.evaluate("""() => {
-            const roots = [document];
-            const seen = new Set([document]);
-            const stack = [document];
-            while (stack.length) {
-                const root = stack.pop();
-                if (!root || !root.querySelectorAll) continue;
-                root.querySelectorAll('*').forEach((el) => {
-                    if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-                        seen.add(el.shadowRoot);
-                        roots.push(el.shadowRoot);
-                        stack.push(el.shadowRoot);
-                    }
-                });
-            }
-            const isRagRow = (el) => {
-                const txt = ((el.innerText || el.textContent || "") + "").toLowerCase();
-                return txt.includes("ragfileudmo") || txt.includes("rag file udmo") || (txt.includes("rag") && txt.includes("udmo"));
-            };
-            for (const r of roots) {
-                if (!r.querySelectorAll) continue;
-                const rows = r.querySelectorAll("tr,li,div,[role='row']");
-                for (const row of rows) {
-                    if (!isRagRow(row)) continue;
-                    const ariaSelected = row.getAttribute("aria-selected") === "true";
-                    const checkedInside = row.querySelector("input[type='radio']:checked, [role='radio'][aria-checked='true']");
-                    if (ariaSelected || checkedInside) return true;
-                }
-                // Some variants render radio controls outside strict row semantics.
-                const checked = r.querySelectorAll("input[type='radio']:checked, [role='radio'][aria-checked='true']");
-                for (const c of checked) {
-                    const host = c.closest("tr,li,div,[role='row']") || c.parentElement;
-                    const txt = ((host?.innerText || host?.textContent || c.innerText || c.textContent || "") + "").toLowerCase();
-                    if (txt.includes("ragfileudmo") || txt.includes("rag file udmo") || (txt.includes("rag") && txt.includes("udmo"))) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }""")
-            if dmo_selected_confirmed:
-                print(f"   [create_index] ✅ DMO selection verified after {verify_attempt + 1} attempt(s)", flush=True)
-                break
-            elif verify_attempt < 2:
-                print(f"   [create_index] ⚠️  DMO not confirmed yet, retrying verification (attempt {verify_attempt + 2}/3)...", flush=True)
-
-        print(
-            f"   [create_index] dmo selection confirmed={dmo_selected_confirmed} "
-            f"(js={row_selected_via_js}, locator={row_selected_via_locator}, keyboard={row_selected_via_keyboard})",
-            flush=True,
-        )
-        async def _click_next_resilient(stage_label: str) -> None:
-            try:
-                await builder.get_by_role("button", name="Next").click(timeout=10000)
-                return
-            except Exception:
-                pass
-            try:
-                await builder.locator("button:has-text('Next'), [role='button']:has-text('Next')").first.click(timeout=8000)
-                return
-            except Exception:
-                pass
-            js_next_clicked = await builder.evaluate("""() => {
-                const roots = [document];
-                const seen = new Set([document]);
-                const stack = [document];
-                while (stack.length) {
-                    const root = stack.pop();
-                    if (!root || !root.querySelectorAll) continue;
-                    root.querySelectorAll('*').forEach((el) => {
-                        if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-                            seen.add(el.shadowRoot);
-                            roots.push(el.shadowRoot);
-                            stack.push(el.shadowRoot);
-                        }
-                    });
-                }
-                const isVisible = (el) => {
-                    const r = el.getBoundingClientRect();
-                    const s = window.getComputedStyle(el);
-                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-                };
-                for (const r of roots) {
-                    if (!r.querySelectorAll) continue;
-                    const candidates = r.querySelectorAll("button,[role='button'],lightning-button,lightning-button button");
-                    for (const el of candidates) {
-                        const txt = ((el.innerText || el.textContent || '') + '').trim().toLowerCase();
-                        if (txt !== 'next') continue;
-                        if (!isVisible(el)) continue;
-                        const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
-                        if (disabled) continue;
-                        try { el.click(); return true; } catch (_) {}
-                    }
-                }
-                return false;
-            }""")
-            print(f"   [create_index] next js_click({stage_label})={js_next_clicked}", flush=True)
-            if js_next_clicked:
-                return
-            raise RuntimeError(f"Unable to click Next at stage '{stage_label}'")
-
+        print("   [create_index] Builder opened. Hybrid + RagFileUDMO...", flush=True)
+        hybrid_btn = builder.get_by_text("Hybrid search", exact=False).or_(builder.get_by_text("Hybrid Search", exact=False)).first
+        await hybrid_btn.wait_for(state="visible", timeout=15000)
+        await hybrid_btn.click()
         await asyncio.sleep(0.5)
+        searchbox = builder.get_by_role("searchbox", name="Search data model objects…")
+        await searchbox.wait_for(state="visible", timeout=15000)
+        await searchbox.fill("rag")
+        await asyncio.sleep(2.5)
+        row_with_dmo = builder.locator("tr").filter(has_text="RagFileUDMO")
         try:
-            if row_selected_via_js or row_selected_via_locator or row_selected_via_keyboard or dmo_selected_confirmed:
-                await _click_next_resilient("post-dmo-selection")
-            else:
-                # Last-resort: if the UI preselected a default object, Next can still work
-                # after a brief render delay.
-                await asyncio.sleep(1.0)
-                await _click_next_resilient("post-dmo-selection-preselected")
-        except Exception as next_err:
-            # Some UI variants auto-advance to parser step without exposing a clickable Next.
-            parser_step_visible = False
-            for parser_label in ["LLM-based Parser", "LLM Parser"]:
-                try:
-                    if await builder.get_by_text(parser_label, exact=True).first.is_visible():
-                        parser_step_visible = True
-                        break
-                except Exception:
-                    pass
-            if not parser_step_visible:
-                raise next_err
-            print("   [create_index] ⚠️ Next unavailable but parser step already visible; continuing.", flush=True)
+            await row_with_dmo.locator("label.slds-radio__label, .slds-radio__label").first.click(timeout=12000)
+        except Exception:
+            await row_with_dmo.locator("input[type='radio']").first.click(force=True, timeout=8000)
+        await asyncio.sleep(0.5)
+        await builder.get_by_role("button", name="Next").click()
         await asyncio.sleep(1)
         for parser_label in ["LLM-based Parser", "LLM Parser"]:
             loc = builder.get_by_text(parser_label, exact=True)
@@ -2988,9 +2282,9 @@ async def _create_search_index_ui(
         await textarea.wait_for(state="visible", timeout=10000)
         await textarea.fill(parser_prompt)
         # Two Next clicks to reach the chunking configuration step.
-        await _click_next_resilient("to-chunking-1")
+        await builder.get_by_role("button", name="Next").click()
         await asyncio.sleep(3)
-        await _click_next_resilient("to-chunking-2")
+        await builder.get_by_role("button", name="Next").click()
         await asyncio.sleep(3)
 
         pdf_row = builder.locator("tr").filter(has_text="pdf").first
@@ -3202,28 +2496,8 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
         return False
 
     async with async_playwright() as p:
-        launch_args = {'slow_mo': 100}
-        if headless:
-            # Required args for headless Chromium on Heroku/Linux containers
-            launch_args['args'] = [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-software-rasterizer',
-                '--disable-extensions'
-            ]
-        browser = await p.chromium.launch(headless=headless, **launch_args)
-        storage_state = None
-        try:
-            auth_b64 = os.getenv("SF_AUTH_STATE_B64", "").strip()
-            if auth_b64:
-                storage_state = json.loads(base64.b64decode(auth_b64).decode("utf-8"))
-                print("   [create_retriever] Found SF_AUTH_STATE_B64, attempting session restore...", flush=True)
-        except Exception as e:
-            print(f"   [create_retriever] ⚠️ Could not decode SF_AUTH_STATE_B64: {e}", flush=True)
-            storage_state = None
-        context = await browser.new_context(viewport={"width": 1280, "height": 720}, storage_state=storage_state)
+        browser = await p.chromium.launch(headless=headless, slow_mo=100)
+        context = await browser.new_context(viewport={"width": 1280, "height": 720})
         page = await context.new_page()
         if should_abort():
             await browser.close()
@@ -3249,154 +2523,38 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
         if should_abort():
             await browser.close()
             return ("", False)
-        print("   ↳ Navigating to Einstein Studio...", flush=True)
         await page.get_by_role("button", name="Show more navigation items").click()
         await page.get_by_role("menuitem", name="Einstein Studio").click()
         await page.wait_for_load_state("domcontentloaded", timeout=15000)
         await asyncio.sleep(1.5)
-        print("   ↳ Opening Retrievers page...", flush=True)
         await page.get_by_role("link", name="Retrievers").click()
         await page.wait_for_load_state("domcontentloaded", timeout=15000)
         await asyncio.sleep(1)
-        print("   ↳ Clicking New Retriever...", flush=True)
         await page.get_by_role("button", name="New Retriever").click()
         await asyncio.sleep(0.5)
-        print("   ↳ Waiting for popup...", flush=True)
         async with page.expect_popup(timeout=45000) as popup_info:
             await page.get_by_role("button", name="Next").click()
         popup = await popup_info.value
         await popup.wait_for_load_state("domcontentloaded")
         await asyncio.sleep(1)
-        print("   ↳ Selecting Data Cloud...", flush=True)
         await popup.get_by_text("Data Cloud", exact=True).click()
         await asyncio.sleep(0.3)
         await popup.get_by_role("button", name="Next").click()
         await asyncio.sleep(0.5)
-        print("   ↳ Waiting for DMO combobox...", flush=True)
         dmo_combobox = popup.get_by_role("combobox", name="Select a data model object")
         for _attempt in range(60):
             if await dmo_combobox.is_enabled():
                 break
             await asyncio.sleep(1)
         await dmo_combobox.click()
-        print("   ↳ Selecting RagFileUDMO...", flush=True)
         rag_option = popup.get_by_text("RagFileUDMO", exact=True).first
         await rag_option.wait_for(state="visible", timeout=30000)
         await rag_option.click()
         await asyncio.sleep(0.5)
-
-        # Wait briefly for dropdown to be ready
-        print(f"   ↳ Waiting 3s for dropdown to be ready...", flush=True)
-        await asyncio.sleep(3)
-
-        # Open dropdown and select index
-        print(f"   ↳ Searching for index '{index_name}' in dropdown...", flush=True)
-        search_combobox = popup.get_by_role("combobox", name="Data model object's search")
-
-        # Open the dropdown
-        await search_combobox.click()
-        await asyncio.sleep(2)
-
-        # Wait for options to exist in DOM (don't check visibility - LWC marks them hidden)
-        await popup.locator('[role="option"]').first.wait_for(state="attached", timeout=10000)
-        await asyncio.sleep(1)  # Let dropdown fully render
-
-        option_count = await popup.locator('[role="option"]').count()
-        print(f"   ↳ Dropdown has {option_count} options", flush=True)
-
-        # Find and click using JavaScript that handles Shadow DOM
-        found = await popup.evaluate("""
-            (indexName) => {
-                // Function to get all text from element including shadow DOM
-                function getAllText(element) {
-                    let text = '';
-                    // Get direct text nodes
-                    for (const node of element.childNodes) {
-                        if (node.nodeType === Node.TEXT_NODE) {
-                            text += node.textContent;
-                        }
-                    }
-                    // Traverse shadow DOM
-                    if (element.shadowRoot) {
-                        text += getAllText(element.shadowRoot);
-                    }
-                    // Traverse children
-                    for (const child of element.children) {
-                        text += getAllText(child);
-                    }
-                    return text;
-                }
-
-                const options = document.querySelectorAll('[role="option"]');
-                console.log(`DEBUG: Found ${options.length} options total`);
-
-                // Debug: show first 20 options
-                for (let i = 0; i < Math.min(20, options.length); i++) {
-                    const text = getAllText(options[i]);
-                    console.log(`DEBUG: Option ${i}: "${text.trim()}" (length: ${text.length})`);
-                }
-
-                // Search for target index
-                for (let i = 0; i < options.length; i++) {
-                    const text = getAllText(options[i]);
-                    if (text && text.includes(indexName)) {
-                        console.log(`✅ Found index at option ${i}: ${text.trim()}`);
-                        options[i].click();
-                        return true;
-                    }
-                }
-                return false;
-            }
-        """, index_name)
-
-        if found:
-            print(f"   ✅ Found and clicked index '{index_name}'", flush=True)
-        else:
-            # Fallback: try Playwright locator with shadow DOM traversal
-            print(f"   ⚠️  JavaScript click failed, trying locator with shadow DOM...", flush=True)
-            options = await popup.locator('[role="option"]').all()
-            get_shadow_text_js = """
-                (element) => {
-                    function getAllText(el) {
-                        let text = '';
-                        for (const node of el.childNodes) {
-                            if (node.nodeType === 3) text += node.textContent;
-                        }
-                        if (el.shadowRoot) {
-                            for (const child of el.shadowRoot.querySelectorAll('*')) {
-                                text += getAllText(child);
-                            }
-                        }
-                        for (const child of el.children) {
-                            text += getAllText(child);
-                        }
-                        return text;
-                    }
-                    return getAllText(element);
-                }
-            """
-            for i, opt in enumerate(options):
-                try:
-                    text = await opt.evaluate(get_shadow_text_js)
-                    if text and index_name in text:
-                        print(f"   ✅ Found index at option {i}: '{text.strip()}'", flush=True)
-                        await opt.click()
-                        found = True
-                        break
-                except Exception as e:
-                    print(f"   ⚠️  Error checking option {i}: {e}", flush=True)
-                    continue
-
-        if not found:
-            # Debug: show what we found with shadow DOM
-            print(f"   ❌ Index '{index_name}' not found. Showing first 20 options:", flush=True)
-            for i, opt in enumerate(options[:20]):
-                try:
-                    text = await opt.evaluate(get_shadow_text_js)
-                    print(f"      [{i}] '{text.strip() if text else '(empty)'}' (length: {len(text)})", flush=True)
-                except Exception as e:
-                    print(f"      [{i}] <error: {e}>", flush=True)
-            raise Exception(f"Index '{index_name}' not found in dropdown")
+        await popup.get_by_role("combobox", name="Data model object's search").click()
+        idx_option = popup.get_by_text(index_name, exact=False).first
+        await idx_option.wait_for(state="visible", timeout=30000)
+        await idx_option.click()
         await asyncio.sleep(0.3)
         await popup.get_by_role("button", name="Next").click()
         await asyncio.sleep(0.5)
@@ -3680,45 +2838,16 @@ async def _create_retriever_ui(username, password, instance_url, index_name, sta
 
 async def run_new_index_pipeline(
     username, password, instance_url, prompt_template_api_name, previous_cycle_prompt,
-    source_index_id, state_dir, run_id=None, headless=False, index_prefix=None, resume_state=None,
-    save_state_callback=None
+    state_dir, run_id=None, headless=False, index_prefix=None
 ):
     """
     Full Cycle 2+ pipeline: Create Index → Poll → Create Retriever → Poll retriever → Update prompt template.
-
-    **UPDATED (2026-03-30):** Index creation now uses API-first provisioning (no UI).
-    - Index: API-based via create_search_index_api() ✅
-    - Retriever: Still UI-based via _create_retriever_ui() (to be migrated)
-
-    **UPDATED (2026-03-31):** Added resume support at each substep:
-    - Substep 1a: index_created (index created, needs polling)
-    - Substep 1b: index_ready (index READY, needs retriever creation)
-    - Substep 1c: retriever_created (retriever created, needs polling)
-    - Substep 1d: retriever_activated (complete, Step 1 done)
-
-    Args:
-        username: Salesforce username
-        password: Salesforce password
-        instance_url: Salesforce instance URL
-        prompt_template_api_name: Prompt template API name to update
-        previous_cycle_prompt: Parser prompt from previous cycle
-        source_index_id: Baseline/source index ID to copy structure from
-        state_dir: Directory for state files
-        run_id: Optional run ID for abort checks
-        headless: Headless mode for UI automation (retriever creation)
-        index_prefix: Index name prefix (e.g., "Opt_P1")
-        resume_state: State dict from previous run (for resume)
-        save_state_callback: Callback to save state after each substep
-
-    Returns:
-        Tuple (new_search_index_id, new_retriever_api_name) or (None, None) on failure/abort
-
-    Reference: IMPLEMENTATION_PLAN_20260330_094433.md requirements #1-4, #8-9
+    Returns (new_search_index_id, new_retriever_api_name) or (None, None) on failure/abort.
+    index_prefix: pipeline-specific prefix like "Opt_P1" (defaults to legacy global name).
     """
     from salesforce_api import (
         get_salesforce_credentials, get_next_index_name, poll_index_until_ready,
-        poll_retriever_until_activated, update_genai_prompt_with_retriever, find_index_id_by_name,
-        create_search_index_api,
+        poll_retriever_until_activated, update_genai_prompt_with_retriever,
     )
 
     def should_abort():
@@ -3729,123 +2858,59 @@ async def run_new_index_pipeline(
         raise ValueError("indexPrefix is required in YAML configuration. No hardcoded fallback.")
     if index_prefix[0].isdigit():
         raise ValueError(f"indexPrefix '{index_prefix}' starts with a digit. Salesforce developer names must start with a letter.")
-
-    # Resume handling: check which substep was completed
-    substep = resume_state.get('step_1_substep') if resume_state else None
-    index_id = resume_state.get('step_1_index_id') if resume_state else None
-    full_index_name = resume_state.get('step_1_index_name') if resume_state else None
-    retriever_display_name = resume_state.get('step_1_retriever_name') if resume_state else None
-    retriever_api_name = resume_state.get('step_1_retriever_api_name') if resume_state else None
-
-    # SUBSTEP 1a: Create Index
-    if substep not in ['index_created', 'index_ready', 'retriever_created', 'retriever_activated']:
-        index_name = get_next_index_name(instance_url, access_token, base_name=index_prefix)
-        print(f"\n   Creating Search Index: {index_name}", flush=True)
-
-        # API-FIRST PROVISIONING (IMPLEMENTATION_PLAN requirement #1)
-        try:
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            label = f"{index_prefix} {timestamp}"
-
-            # Create index via API (no UI)
-            index_id, full_index_name = create_search_index_api(
-                instance_url=instance_url,
-                access_token=access_token,
-                label=label,
-                developer_name=index_name,
-                parser_prompt=previous_cycle_prompt,
-                source_index_id=source_index_id,
-                chunk_max_tokens=8000,
-                chunk_overlap_tokens=512,
-                run_id=run_id
-            )
-        except Exception as e:
-            import traceback
-            print(f"   ❌ Create index API failed: {e}", flush=True)
-            print("   Traceback:", flush=True)
-            traceback.print_exc()
-            raise
-
-        if not index_id or should_abort():
-            if should_abort():
-                print("   ⚠️ DIAG: Pipeline stopped - run aborted (user cancelled or status changed)", flush=True)
-            else:
-                print("   ⚠️ DIAG: Pipeline stopped - create_search_index returned no index_id (API lookup failed)", flush=True)
-            return (None, None)
-
-        # Save state after index created
-        print(f"   ✅ Index created: {index_id} ({full_index_name})", flush=True)
-        if save_state_callback:
-            save_state_callback(step_1_substep='index_created', step_1_index_id=index_id, step_1_index_name=full_index_name)
-        substep = 'index_created'
-    else:
-        print(f"\n   ↻ Resuming from substep: {substep}", flush=True)
-        print(f"   ↻ Using existing index: {index_id} ({full_index_name})", flush=True)
-
-    # SUBSTEP 1b: Poll Index
-    if substep == 'index_created':
-        print(f"   Polling index until Ready (this may take 30min-6hr)...", flush=True)
-        if not poll_index_until_ready(index_id, instance_url, access_token, run_id=run_id):
-            return (None, None)
-        print(f"   ✅ Index ready: {index_id}", flush=True)
-        if save_state_callback:
-            save_state_callback(step_1_substep='index_ready', step_1_index_id=index_id, step_1_index_name=full_index_name)
-        substep = 'index_ready'
-    elif substep in ['index_ready', 'retriever_created', 'retriever_activated']:
-        print(f"   ↻ Index already READY, skipping poll", flush=True)
-
-    # SUBSTEP 1c: Create Retriever
-    if substep == 'index_ready':
-        print(f"   Creating Retriever...", flush=True)
-
-        # Fetch index label for dropdown selection (dropdown shows label, not developer name)
-        from salesforce_api import SearchIndexAPI
-        idx_api = SearchIndexAPI(instance_url, access_token)
-        index_details = idx_api.get_index(index_id)
-        index_label = index_details.get('label', full_index_name)
-        print(f"   ↳ Index label for dropdown: {index_label}", flush=True)
-
-        try:
-            retriever_display_name, _ = await _create_retriever_ui(
-                username, password, instance_url, index_label, state_dir, run_id, headless, should_abort
-            )
-        except Exception as e:
-            print(f"   ❌ Create retriever failed: {e}", flush=True)
-            print(f"   ⚠️ Index ID {index_id} - manual cleanup may be needed.", flush=True)
-            raise
-
-        if not retriever_display_name or should_abort():
-            return (None, None)
-        print(f"   ✅ Retriever created: {retriever_display_name}", flush=True)
-        if save_state_callback:
-            save_state_callback(step_1_substep='retriever_created', step_1_index_id=index_id,
-                              step_1_index_name=full_index_name, step_1_retriever_name=retriever_display_name)
-        substep = 'retriever_created'
-    elif substep in ['retriever_created', 'retriever_activated']:
-        print(f"   ↻ Retriever already created, skipping UI creation", flush=True)
-
-    # SUBSTEP 1d: Poll Retriever
-    if substep == 'retriever_created':
-        print(f"   Polling retriever until activated...", flush=True)
-        retriever_api_name, retriever_label = poll_retriever_until_activated(
-            instance_url, access_token, retriever_display_name, run_id=run_id
+    index_name = get_next_index_name(instance_url, access_token, base_name=index_prefix)
+    print(f"\n   Creating Search Index: {index_name}", flush=True)
+    try:
+        index_id, full_index_name = await _create_search_index_ui(
+            username, password, instance_url, index_name, previous_cycle_prompt,
+            state_dir, run_id, headless, should_abort, access_token=access_token
         )
-        if not retriever_api_name:
-            return (None, None)
-        print(f"   ✅ Retriever activated: {retriever_api_name}", flush=True)
-        if save_state_callback:
-            save_state_callback(step_1_substep='retriever_activated', step_1_index_id=index_id,
-                              step_1_index_name=full_index_name, step_1_retriever_name=retriever_display_name,
-                              step_1_retriever_api_name=retriever_api_name)
-        substep = 'retriever_activated'
-    elif substep == 'retriever_activated':
-        print(f"   ↻ Retriever already activated: {retriever_api_name}", flush=True)
+    except Exception as e:
+        import traceback
+        print(f"   ❌ Create index failed: {e}", flush=True)
+        print("   Traceback:", flush=True)
+        traceback.print_exc()
+        latest = state_dir / (f"run_{run_id}_latest_index.json" if run_id else "latest_index.json")
+        if latest.exists():
+            try:
+                d = json.loads(latest.read_text(encoding="utf-8"))
+                idx = d.get("indexId")
+                if idx:
+                    print(f"   ⚠️ Partial failure: Index ID {idx} created - manual cleanup may be needed.", flush=True)
+            except Exception:
+                pass
+        raise
 
-    # Update prompt template
+    if not index_id or should_abort():
+        if should_abort():
+            print("   ⚠️ DIAG: Pipeline stopped - run aborted (user cancelled or status changed)", flush=True)
+        else:
+            print("   ⚠️ DIAG: Pipeline stopped - create_search_index returned no index_id (API lookup failed)", flush=True)
+        return (None, None)
+    print(f"   Polling index until Ready...", flush=True)
+    if not poll_index_until_ready(index_id, instance_url, access_token, run_id=run_id):
+        return (None, None)
+    print(f"   Creating Retriever...", flush=True)
+    try:
+        retriever_display_name, _ = await _create_retriever_ui(
+            username, password, instance_url, full_index_name, state_dir, run_id, headless, should_abort
+        )
+    except Exception as e:
+        print(f"   ❌ Create retriever failed: {e}", flush=True)
+        print(f"   ⚠️ Index ID {index_id} - manual cleanup may be needed.", flush=True)
+        raise
+
+    if not retriever_display_name or should_abort():
+        return (None, None)
+    print(f"   Polling retriever until activated...", flush=True)
+    retriever_api_name, retriever_label = poll_retriever_until_activated(
+        instance_url, access_token, retriever_display_name, run_id=run_id
+    )
+    if not retriever_api_name:
+        return (None, None)
     print(f"   Updating prompt template with retriever...", flush=True)
     if not update_genai_prompt_with_retriever(
-        instance_url, access_token, prompt_template_api_name, retriever_api_name, retriever_display_name
+        instance_url, access_token, prompt_template_api_name, retriever_api_name, retriever_label or retriever_display_name
     ):
         return (None, None)
     print(f"   ✅ Pipeline complete. New index: {index_id}, retriever: {retriever_api_name}", flush=True)

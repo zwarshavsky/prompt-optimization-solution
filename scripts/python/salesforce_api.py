@@ -407,7 +407,7 @@ def invoke_prompt(instance_url, access_token, question, prompt_name, max_retries
                             "data": {
                                 "runId": effective_run_id,
                                 "status": status_check,
-                                "model": current_model,
+                                "model": "template_default",
                                 "attempt": attempt + 1
                             },
                             "timestamp": int(_time_for_agent_log.time() * 1000)
@@ -886,7 +886,7 @@ class SearchIndexAPI:
         else:
             self.instance_url, self.access_token = get_salesforce_credentials()
         
-        self.api_version = 'v65.0'
+        self.api_version = 'v64.0'  # Per IMPLEMENTATION_PLAN: align with proven runs
         self.base_url = f"{self.instance_url}/services/data/{self.api_version}/ssot/search-index"
         
         self.session = requests.Session()
@@ -1046,6 +1046,371 @@ def find_index_id_by_name(
         except Exception as e:
             log_print(f"   ⚠️ Lookup attempt {attempt + 1}: {e}")
     return None
+
+
+# ============================================================================
+# Search Index Payload Builder and Validation (API-First Provisioning)
+# ============================================================================
+
+def build_index_payload(
+    label: str,
+    developer_name: str,
+    parser_prompt: str,
+    source_index_data: Dict[str, Any],
+    chunk_max_tokens: int = 8000,
+    chunk_overlap_tokens: int = 512,
+    vector_model: str = "hybrid",
+    enable_image_processing: bool = False
+) -> Dict[str, Any]:
+    """
+    Build Search Index payload by copying structure from existing index.
+
+    This matches create_index_v64_working.py which:
+    1. Fetches an existing working index
+    2. Copies its structure (chunking, vector, transforms, etc.)
+    3. Updates label, developer_name, and parser prompt
+    4. Posts the modified payload
+
+    Args:
+        label: Display label for the index
+        developer_name: API name for the index
+        parser_prompt: LLM parser prompt text
+        source_index_data: Existing index data from GET /ssot/search-index/{id}
+        chunk_max_tokens: Max tokens per chunk (default: 8000)
+        chunk_overlap_tokens: Overlap tokens between chunks (default: 512)
+        vector_model: Embedding model (default: "hybrid")
+        enable_image_processing: Enable image transform (default: False)
+
+    Returns:
+        Dict payload ready for POST /services/data/v64.0/ssot/search-index
+    """
+    from copy import deepcopy
+
+    # Build payload by copying source index structure
+    payload = {
+        "label": label,
+        "developerName": developer_name,
+        "sourceDmoDeveloperName": source_index_data["sourceDmoDeveloperName"],
+        "chunkDmoName": f"{label} chunk",
+        "chunkDmoDeveloperName": f"{developer_name}_ch",
+        "vectorDmoName": f"{label} index",
+        "vectorDmoDeveloperName": f"{developer_name}_ix",
+        "vectorEmbedding": {"vectorEmbeddingRelatedFields": []},
+        "chunkingConfiguration": {"fileLevelConfiguration": {"perFileExtensions": []}},
+        "vectorEmbeddingConfiguration": deepcopy(source_index_data["vectorEmbeddingConfiguration"]),
+        "searchType": source_index_data.get("searchType", "HYBRID").upper(),
+        "rankingConfigurations": [],
+        "parsingConfigurations": [],
+        "preProcessingConfigurations": [],
+        "transformConfigurations": deepcopy(source_index_data.get("transformConfigurations", []))
+    }
+
+    # Copy chunking configuration and update PDF tokens if specified
+    per_ext = source_index_data.get("chunkingConfiguration", {}).get("perFileExtension", [])
+    for ext in per_ext:
+        rebuilt = {
+            "fileExtension": ext["fileExtension"],
+            "config": deepcopy(ext["config"])
+        }
+        if ext.get("citations"):
+            rebuilt["citations"] = deepcopy(ext["citations"])
+
+        # Update PDF tokens if this is PDF extension
+        if ext["fileExtension"].lower() == "pdf" and (chunk_max_tokens or chunk_overlap_tokens is not None):
+            uv = rebuilt["config"].get("userValues", [])
+            out_uv = []
+            seen = set()
+            for item in uv:
+                item_id = item.get("id")
+                if item_id == "max_tokens" and chunk_max_tokens:
+                    out_uv.append({"id": "max_tokens", "value": str(chunk_max_tokens)})
+                    seen.add("max_tokens")
+                elif item_id == "overlap_tokens" and chunk_overlap_tokens is not None:
+                    out_uv.append({"id": "overlap_tokens", "value": str(chunk_overlap_tokens)})
+                    seen.add("overlap_tokens")
+                else:
+                    out_uv.append(item)
+            if chunk_max_tokens and "max_tokens" not in seen:
+                out_uv.append({"id": "max_tokens", "value": str(chunk_max_tokens)})
+            if chunk_overlap_tokens is not None and "overlap_tokens" not in seen:
+                out_uv.append({"id": "overlap_tokens", "value": str(chunk_overlap_tokens)})
+            rebuilt["config"]["userValues"] = out_uv
+
+        payload["chunkingConfiguration"]["fileLevelConfiguration"]["perFileExtensions"].append(rebuilt)
+
+    # Copy parser configurations and update prompt
+    # CRITICAL: Must include fileExtensions, sourceDmoDeveloperName, sourceDmoFieldDeveloperName
+    # These fields trigger the index build process
+    for config in source_index_data.get("parsingConfigurations", []):
+        config_copy = deepcopy(config)
+        if config_copy.get("config", {}).get("id") == "parse_documents_using_llm":
+            # Update the prompt value
+            for uv in config_copy["config"].get("userValues", []):
+                if uv.get("id") == "prompt":
+                    uv["value"] = parser_prompt
+                    break
+        payload["parsingConfigurations"].append(config_copy)
+
+    return payload
+
+
+def validate_index_payload(payload: Dict[str, Any]) -> tuple:
+    """
+    Validate Search Index payload before POST to catch errors early.
+
+    Checks:
+    - Required fields present
+    - Developer name constraints (starts with letter, length)
+    - Parser in parsingConfigurations (not preProcessingConfigurations)
+    - Parser prompt present in userValues
+    - Chunking and vector configurations present
+
+    Args:
+        payload: Index payload to validate
+
+    Returns:
+        Tuple (is_valid: bool, errors: List[str])
+
+    Reference: IMPLEMENTATION_PLAN_20260330_094433.md requirement #8
+    """
+    errors = []
+
+    # Required fields
+    if not payload.get('label'):
+        errors.append("Missing required field: 'label'")
+    if not payload.get('developerName'):
+        errors.append("Missing required field: 'developerName'")
+
+    # Developer name constraints (Salesforce API requirements)
+    dev_name = payload.get('developerName', '')
+    if dev_name:
+        if dev_name[0].isdigit():
+            errors.append(f"Invalid developerName '{dev_name}': must start with a letter (not digit)")
+        if len(dev_name) > 80:
+            errors.append(f"Invalid developerName '{dev_name}': too long ({len(dev_name)} chars, max 80)")
+        # Check for invalid characters
+        if not re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', dev_name):
+            errors.append(f"Invalid developerName '{dev_name}': must contain only letters, numbers, and underscores")
+
+    # Parser configuration (CRITICAL: must be in parsingConfigurations with config wrapper)
+    parsing_configs = payload.get('parsingConfigurations', [])
+    if not parsing_configs:
+        errors.append("Missing 'parsingConfigurations' - LLM parser must be configured")
+    else:
+        found_llm_parser = False
+        for config_entry in parsing_configs:
+            config_obj = config_entry.get('config', {})
+            config_id = config_obj.get('id', '')
+            if config_id == 'parse_documents_using_llm':
+                found_llm_parser = True
+                # Validate prompt is present in userValues
+                user_values = config_obj.get('userValues', [])
+                prompt_found = False
+                prompt_value = None
+                for uv in user_values:
+                    if uv.get('id') == 'prompt':
+                        prompt_found = True
+                        prompt_value = uv.get('value', '')
+                        break
+
+                if not prompt_found:
+                    errors.append("LLM parser config missing 'prompt' in userValues")
+                elif not prompt_value or len(prompt_value.strip()) == 0:
+                    errors.append("LLM parser prompt is empty or whitespace-only")
+                break
+
+        if not found_llm_parser:
+            errors.append("LLM parser (parse_documents_using_llm) not found in parsingConfigurations")
+
+    # Check that parser is NOT in preProcessingConfigurations (common mistake)
+    if 'preProcessingConfigurations' in payload:
+        pre_configs = payload['preProcessingConfigurations']
+        if pre_configs:
+            for config in pre_configs:
+                config_obj = config.get('config', {})
+                if config_obj.get('id') == 'parse_documents_using_llm':
+                    errors.append("ERROR: Parser found in 'preProcessingConfigurations' - must be in 'parsingConfigurations'")
+
+    # Required DMO fields per working script
+    required_dmo_fields = ['sourceDmoDeveloperName', 'chunkDmoName', 'chunkDmoDeveloperName',
+                           'vectorDmoName', 'vectorDmoDeveloperName']
+    for field in required_dmo_fields:
+        if not payload.get(field):
+            errors.append(f"Missing required field: '{field}'")
+
+    # Required top-level fields per working script
+    if 'searchType' not in payload:
+        errors.append("Missing 'searchType'")
+    if 'vectorEmbedding' not in payload:
+        errors.append("Missing 'vectorEmbedding'")
+    if 'rankingConfigurations' not in payload:
+        errors.append("Missing 'rankingConfigurations'")
+
+    # Chunking configuration validation
+    if 'chunkingConfiguration' not in payload:
+        errors.append("Missing 'chunkingConfiguration'")
+
+    # Vector configuration validation
+    if 'vectorEmbeddingConfiguration' not in payload:
+        errors.append("Missing 'vectorEmbeddingConfiguration'")
+
+    # Note: sourceDmoName is not required for CREATE - it's set by the system
+
+    # Return validation result
+    if errors:
+        return (False, errors)
+    return (True, [])
+
+
+def create_search_index_api(
+    instance_url: str,
+    access_token: str,
+    label: str,
+    developer_name: str,
+    parser_prompt: str,
+    source_index_id: str,
+    chunk_max_tokens: int = 8000,
+    chunk_overlap_tokens: int = 512,
+    run_id: Optional[str] = None,
+    dump_payload_path: Optional[str] = None
+) -> tuple:
+    """
+    Create Search Index via API by copying structure from existing index.
+
+    Matches create_index_v64_working.py approach:
+    1. Fetch existing source index
+    2. Copy its structure (chunking, vector, transforms)
+    3. Update label, developer_name, parser prompt
+    4. POST to /ssot/search-index
+
+    Args:
+        instance_url: Salesforce instance URL
+        access_token: Auth token
+        label: Display label for index
+        developer_name: API name for index
+        parser_prompt: LLM parser prompt text
+        source_index_id: ID of existing index to copy structure from
+        chunk_max_tokens: Chunking max tokens (default: 8000)
+        chunk_overlap_tokens: Chunking overlap (default: 512)
+        run_id: Optional run ID for abort checks
+
+    Returns:
+        Tuple (index_id: str, full_index_name: str) or (None, None) on failure
+    """
+    from worker_utils import check_run_aborted
+
+    log_print(f"\n🔧 Creating Search Index via API (API-first provisioning)")
+    log_print(f"   Label: {label}")
+    log_print(f"   Developer Name: {developer_name}")
+    log_print(f"   Parser Prompt: {len(parser_prompt)} chars")
+    log_print(f"   Source Index: {source_index_id}")
+
+    # Check for abort before starting
+    if run_id and check_run_aborted(run_id):
+        log_print("   ⚠️  Run aborted before index creation")
+        return (None, None)
+
+    # Step 0: Fetch source index structure
+    log_print(f"   [1/5] Fetching source index structure...")
+    try:
+        api = SearchIndexAPI(instance_url, access_token)
+        source_index_data = api.get_index(source_index_id)
+        log_print(f"   ✅ Fetched source index: {source_index_data.get('label', 'unknown')}")
+    except Exception as e:
+        log_print(f"   ❌ Failed to fetch source index: {e}")
+        return (None, None)
+
+    # Step 1: Build payload from source
+    log_print(f"   [2/5] Building index payload from source...")
+    try:
+        payload = build_index_payload(
+            label=label,
+            developer_name=developer_name,
+            parser_prompt=parser_prompt,
+            source_index_data=source_index_data,
+            chunk_max_tokens=chunk_max_tokens,
+            chunk_overlap_tokens=chunk_overlap_tokens
+        )
+        log_print(f"   ✅ Payload built: {len(json.dumps(payload))} bytes")
+    except Exception as e:
+        log_print(f"   ❌ Payload build failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return (None, None)
+
+    # Step 2: Validate payload (preflight checks)
+    log_print(f"   [3/5] Validating payload...")
+    valid, errors = validate_index_payload(payload)
+    if not valid:
+        log_print(f"   ❌ Payload validation failed:")
+        for err in errors:
+            log_print(f"      - {err}")
+        return (None, None)
+    log_print(f"   ✅ Payload validation passed")
+
+    # Dump payload for comparison if requested
+    if dump_payload_path:
+        try:
+            with open(dump_payload_path, 'w') as f:
+                json.dump(payload, f, indent=2)
+            log_print(f"   💾 Payload dumped to: {dump_payload_path}")
+        except Exception as e:
+            log_print(f"   ⚠️  Failed to dump payload: {e}")
+
+    # Check for abort after validation
+    if run_id and check_run_aborted(run_id):
+        log_print("   ⚠️  Run aborted after payload validation")
+        return (None, None)
+
+    # Step 3: POST to API
+    log_print(f"   [4/5] Creating index via POST /ssot/search-index...")
+    try:
+        result = api.create_index(payload)
+
+        index_id = result.get('id')
+        if not index_id:
+            log_print(f"   ❌ API returned no index_id: {result}")
+            return (None, None)
+
+        log_print(f"   ✅ Index created via API: {index_id}")
+
+    except Exception as e:
+        log_print(f"   ❌ API create_index failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return (None, None)
+
+    # Step 4: Verify index was created by fetching it back
+    log_print(f"   [5/5] Verifying index creation...")
+    try:
+        index_data = api.get_index(index_id)
+        actual_dev_name = index_data.get('developerName', developer_name)
+        runtime_status = index_data.get('runtimeStatus', 'UNKNOWN')
+
+        log_print(f"   ✅ Index verified:")
+        log_print(f"      - ID: {index_id}")
+        log_print(f"      - Developer Name: {actual_dev_name}")
+        log_print(f"      - Runtime Status: {runtime_status}")
+
+        # Verify parser is configured correctly
+        parsing_configs = index_data.get('parsingConfigurations', [])
+        parser_verified = False
+        for config in parsing_configs:
+            config_obj = config.get('config', {})
+            if config_obj.get('id') == 'parse_documents_using_llm':
+                parser_verified = True
+                log_print(f"      - Parser: parse_documents_using_llm ✅")
+                break
+
+        if not parser_verified:
+            log_print(f"      ⚠️  WARNING: LLM parser not found in created index")
+
+        return (index_id, actual_dev_name)
+
+    except Exception as e:
+        log_print(f"   ⚠️  Could not verify index (but it was created): {e}")
+        # Return the index_id anyway since creation succeeded
+        return (index_id, developer_name)
 
 
 # ============================================================================
@@ -1341,6 +1706,9 @@ __all__ = [
     "update_genai_prompt_with_retriever",
     "get_next_index_name",
     "find_index_id_by_name",
+    "build_index_payload",
+    "validate_index_payload",
+    "create_search_index_api",
 ]
 
 
