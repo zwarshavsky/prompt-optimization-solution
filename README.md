@@ -1,565 +1,55 @@
-<img width="1024" height="572" alt="image" src="https://github.com/user-attachments/assets/014767de-4370-44d9-80fa-eb19750a482a" />
-
-
 # Prompt Optimization Solution
 
-An automated RAG (Retrieval-Augmented Generation) optimization system that iteratively improves LLM parser prompts for Salesforce Data Cloud Search Indexes using AI-driven analysis and testing.
+Optimizes Salesforce Data Cloud search index parser prompts by running test questions, scoring results, and iterating parser updates.
 
-## 🚀 Quick Start: Using the Deployed Application
+## What This App Does
 
-**The application is deployed and ready to use:**
+- Runs refinement cycles against an existing search index.
+- Invokes a Prompt Builder template for each test question.
+- Uses Gemini to analyze misses and suggest parser prompt edits.
+- Stores run state/results in Postgres for web + worker execution.
 
-👉 **[https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/](https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/)**
+## Deployed App
 
-### Using the Deployed App
+- Web UI: [https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/](https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/)
 
-1. **Access the Web Interface**: Open the URL above in your browser
-2. **Create a Job**: Use the web interface to create a new optimization job
-3. **Monitor Progress**: View real-time job status, progress, and results in the dashboard
-4. **Download Results**: Download Excel files with analysis results when jobs complete
+## Required Inputs
 
-**No local setup required** - the application runs entirely in the cloud with persistent storage.
+You need:
 
----
+- Salesforce credentials (`username`, `password`, `instanceUrl`).
+- Existing Data Cloud Search Index ID (`searchIndexId`).
+- Prompt Builder template API name (`promptTemplateApiName`).
+- Gemini API key (`GOOGLE_API_KEY`).
+- YAML config file (use `inputs/prompt_optimization_input.yaml.template` as the base).
 
-## Prerequisites
+Do not commit real credentials. Keep local config files in ignored paths.
 
-**These prerequisites are required for BOTH deployed and local usage:**
+## Local Run (Developer)
 
-### 1. Salesforce Org Setup
-
-#### Functional Search Index
-- A **Data Cloud Search Index** that already exists and is functional
-- Must have an **LLM parser prompt** configured
-- Must have a **retriever** pointing to the Search Index
-- **Search Index ID** (18-character Salesforce record ID, e.g., `18lHu000000CgpDIAS`)
-- The solution will **update** this index's LLM parser prompt during optimization
-
-#### Prompt Builder Template
-- A **Prompt Builder prompt template** that already exists
-- Must be configured to use the Search Index (retriever points to the Search Index)
-- **Prompt Template API Name** (DeveloperName, not display name, e.g., `Test_RAG_Optimization_SFR_v1`)
-- The solution will invoke this prompt template to test the Search Index
-
-#### Salesforce Credentials
-- Username and password for Salesforce authentication
-- Instance URL (e.g., `https://yourinstance.my.salesforce.com`)
-
-### 2. YAML Configuration File
-
-A properly configured `prompt_optimization_input.yaml` file containing:
-
-- **Salesforce Configuration**:
-  - `salesforce.username` - Salesforce username
-  - `salesforce.password` - Salesforce password
-  - `salesforce.instanceUrl` - Salesforce instance URL
-  - `searchIndexId` - The 18-character Search Index record ID
-  - `promptTemplateApiName` - The Prompt Builder template DeveloperName
-  - `refinementStage` - Currently `"llm_parser"` (other stages coming soon)
-
-- **Gemini Configuration**:
-  - `geminiModel` - Gemini model to use for analysis (e.g., `"gemini-2.5-pro"`)
-  - `pdfDirectory` - Path to PDF files for context (optional)
-
-- **Test Questions and Ground Truth**:
-  - `questions` - Array of test questions with:
-    - `number` - Question identifier (e.g., `"Q1"`)
-    - `text` - The test question text (single-input prompts; use alone or with `inputs` for `Input:Question`)
-    - `expectedAnswer` - The target/ground truth answer
-  - **Multi-input prompts (optional):** If your Prompt Builder template has multiple inputs (e.g. Product + Question), add `promptInputs` under configuration (list of `apiName` + `displayName`) and per-question `inputs` (map of input API name to value). See Configuration section for an example.
-
-- **Refinement Stage Configuration**:
-  - `refinementStages.llm_parser` - Instructions for Gemini on how to analyze and optimize
-
-**See the [Configuration: YAML Input File](#configuration-yaml-input-file) section below for detailed examples.**
-
-### 3. Source Documents (PDFs or Resource Files)
-
-- **PDF files** (or other resource files) that contain the answers to your test questions
-- These files serve as the **ground truth source** for Gemini analysis
-- All PDFs in the configured `pdfDirectory` will be uploaded to Gemini for context
-- Gemini uses these to verify if the Search Index is retrieving and answering correctly
-
-### 4. Test Questions with Target Answers (Ground Truth)
-
-- A **list of test questions** that will be used to evaluate the Search Index
-- Each question must have a corresponding **expected/target answer** (ground truth)
-- These questions and answers are defined in the YAML configuration file
-- The solution will:
-  1. Invoke the Prompt Builder template with each test question
-  2. Compare the generated answer to the expected answer
-  3. Use Gemini to analyze failures and propose improvements
-
-**Example (single-input):**
-```yaml
-questions:
-  - number: "Q1"
-    text: "How many Siemens 400A breakers can I fit in a distribution section?"
-    expectedAnswer: |
-      - 4x chassis: 10 Thermal Magnetic breakers twin mounted
-      - 5x chassis: 14 Thermal Magnetic breakers twin mounted
-```
-
-**Example (multi-input prompt – Product + Question):**  
-Add `promptInputs` under configuration and use per-question `inputs`:
-```yaml
-configuration:
-  promptInputs:
-    - apiName: "Input:Product"
-      displayName: "Product"
-    - apiName: "Input:Question"
-      displayName: "Question"
-questions:
-  - number: "Q1"
-    inputs:
-      Input:Product: "RiteHite Troubleshooting Manual"
-      Input:Question: "How many breakers fit in a 400A section?"
-    expectedAnswer: "..."
-```
-
-### 5. Google Gemini API Key
-
-- Required for AI-powered analysis of test results
-- Get your API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
-- For deployed app: Set as Heroku config var `GOOGLE_API_KEY`
-- For local testing: Set as environment variable `GOOGLE_API_KEY`
-
----
-
-**Note**: The sections below on "Local Development Setup" are **only for local testing and development**. If you just want to use the application, use the deployed URL above.
-
-### Deployed vs. Local Usage
-
-| Feature | Deployed App | Local Setup |
-|---------|-------------|-------------|
-| **Purpose** | Production use, ready to run | Development, testing, debugging |
-| **Prerequisites** | Same for both (see above) | Same for both (see above) |
-| **Setup Required** | None - just open the URL | Python 3.8+, dependencies, database setup |
-| **Data Storage** | Heroku Postgres (persistent) | Local PostgreSQL or Heroku Postgres |
-| **Access** | [https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/](https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/) | `http://localhost:8501` |
-| **When to Use** | Regular usage, production jobs | Testing changes, development, debugging |
-
-## Overview
-
-This solution automates the optimization of LLM parser prompts for Data Cloud Search Indexes through an iterative refinement process:
-
-1. **Updates** an existing Search Index with an improved LLM parser prompt
-2. **Tests** the updated index by invoking prompts against test questions
-3. **Analyzes** results using Google Gemini AI to identify improvements
-4. **Iterates** until the prompt is optimized or maximum cycles are reached
-
-### Current Functionality
-
-- ✅ **LLM Parser Prompt Optimization**: Updates existing Search Index LLM parser prompts via UI automation
-- ✅ **Automated Testing**: Invokes prompts against test questions and captures responses
-- ✅ **AI-Powered Analysis**: Uses Gemini AI to analyze results and propose prompt improvements
-- ✅ **Iterative Refinement**: Automatically cycles through improvements until optimization criteria are met
-- ✅ **Persistent Job Management**: Worker dyno architecture with graceful shutdown and resume capabilities
-- ✅ **Real-time Monitoring**: Streamlit web interface for job creation and monitoring
-
-### Planned Enhancements
-
-- 🔄 **Prompt Builder Optimization**: Optimize prompts from Prompt Builder (coming soon)
-- 🔄 **Agentforce Agent Optimization**: Optimize Agentforce agent configurations (coming soon)
-- 🔄 **New Search Index Creation**: Create new search indexes with optimized configurations (future)
-- 🔄 **Additional Search Index Components**: Optimize other search index components beyond LLM parser (future)
-
-## Architecture
-
-### System Components
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Streamlit Web App                        │
-│  (app.py) - Job creation, monitoring, Excel file management     │
-└────────────────────────────┬────────────────────────────────────┘
-                              │
-                              │ Queues jobs (status: 'queued')
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Worker Dyno Process                         │
-│  (worker.py) - Polls database, executes jobs, handles shutdown   │
-└────────────────────────────┬────────────────────────────────────┘
-                              │
-                              │ Executes workflow
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Core Workflow Engine                          │
-│  (main.py) - Orchestrates iterative refinement cycles           │
-└──────┬──────────────────────┬──────────────────────┬───────────┘
-       │                      │                      │
-       ▼                      ▼                      ▼
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│  Step 1:     │    │  Step 2:     │    │  Step 3:     │
-│  Update      │───▶│  Test Index  │───▶│  Analyze     │
-│  Index       │    │  & Invoke    │    │  with Gemini │
-│              │    │  Prompts     │    │              │
-└──────┬───────┘    └──────┬───────┘    └──────┬───────┘
-       │                  │                     │
-       │                  │                     │
-       ▼                  ▼                     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Supporting Services                           │
-│  - playwright_scripts.py: UI automation for index updates       │
-│  - salesforce_api.py: REST API calls (prompt invocation, etc.)   │
-│  - gemini_client.py: Gemini AI integration                       │
-│  - excel_io.py: Excel file creation and management              │
-│  - worker_utils.py: Database operations for worker               │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Heroku Postgres Database                      │
-│  - Job status, progress, checkpoints                             │
-│  - Excel file storage (BYTEA)                                    │
-│  - Heartbeat tracking for dead job detection                    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### File Structure
-
-```
-prompt-optimization-solution/
-├── README.md                          # This file
-├── Procfile                           # Heroku process definitions (web + worker)
-├── requirements.txt                   # Python dependencies
-├── inputs/
-│   ├── prompt_optimization_input.yaml # Main configuration file
-│   ├── pdf/                           # PDF files for Gemini context
-│   └── csv/                           # Historical test results
-├── scripts/python/
-│   ├── app.py                         # Streamlit web application
-│   ├── main.py                        # Core workflow orchestration
-│   ├── worker.py                      # Worker dyno process (job execution)
-│   ├── worker_utils.py               # Database utilities for worker
-│   ├── salesforce_api.py              # Salesforce REST API client
-│   ├── playwright_scripts.py          # UI automation (Playwright)
-│   ├── gemini_client.py              # Google Gemini AI client
-│   ├── excel_io.py                   # Excel file operations
-│   └── gemini_config.py              # Gemini configuration
-└── live_outputs/                      # Generated Excel files (local)
-```
-
-### Component Relationships
-
-**Web Application (`app.py`)**
-- Creates jobs with status `'queued'`
-- Monitors job progress via database
-- Displays Excel files from database
-- Detects and marks dead jobs
-
-**Worker Process (`worker.py`)**
-- Polls database for `'queued'` and `'interrupted'` jobs
-- Executes jobs via `main.py`
-- Handles graceful shutdown (SIGTERM)
-- Saves checkpoints and marks jobs as `'interrupted'` on shutdown
-- Automatically resumes interrupted jobs on restart
-
-**Workflow Engine (`main.py`)**
-- Orchestrates 3-step iterative cycles:
-  1. **Step 1**: Update Search Index LLM parser prompt (via Playwright)
-  2. **Step 2**: Test index by invoking prompts against questions
-  3. **Step 3**: Analyze results with Gemini AI
-- Saves state files for resume capability
-- Updates heartbeat on progress callbacks
-- Saves Excel files to database after Step 2 and Step 3
-
-**Supporting Services**
-- `playwright_scripts.py`: Browser automation for updating Search Index prompts
-- `salesforce_api.py`: REST API calls for prompt invocation and metadata retrieval
-- `gemini_client.py`: Google Gemini AI integration for analysis
-- `excel_io.py`: Excel file creation, updates, and database persistence
-- `worker_utils.py`: Database operations (job status, heartbeat, checkpoints)
-
-## APIs Utilized
-
-### Salesforce APIs
-
-1. **SOAP API** (`/services/Soap/u/58.0`)
-   - Authentication (username/password login)
-   - Returns session token for REST API calls
-
-2. **REST API - Prompt Invocation** (`/services/data/v65.0/einstein/prompt-templates/{templateApiName}/generations`)
-   - Invokes Prompt Builder templates with questions using the Generations API
-   - Returns AI-generated responses
-   - Uses the template's configured primary model
-   - Supports retry logic for transient errors
-
-3. **REST API - Metadata Retrieval** (`/services/data/v65.0/tooling/query/`)
-   - Queries Prompt Builder template metadata
-   - Retrieves prompt configuration details
-
-4. **Data Cloud Connect REST API** (`/services/data/v65.0/ssot/search-index`)
-   - Lists and retrieves Search Index configurations
-   - Monitors index status (SUBMITTED → READY)
-   - **Note**: Search Index updates are performed via UI automation (Playwright) due to API limitations
-
-### Google Gemini API
-
-- **Models API** (via `google-generativeai` package)
-  - Text generation for prompt analysis
-  - PDF context upload for document-aware analysis
-  - Model: `gemini-2.5-pro` (configurable in YAML)
-
-### Heroku Postgres
-
-- **PostgreSQL Database**
-  - Job persistence (`runs` table)
-  - Excel file storage (BYTEA)
-  - Checkpoint and heartbeat tracking
-
-## Workflow
-
-### Iterative Refinement Cycle
-
-Each optimization run consists of multiple **refinement cycles**. Each cycle has 3 steps:
-
-#### Cycle 1 (Baseline Test)
-1. **Step 1**: SKIPPED (no previous cycle to improve upon)
-2. **Step 2**: Test current/baseline index
-   - Invoke prompts against all test questions
-   - Capture responses in Excel file
-3. **Step 3**: Analyze results with Gemini
-   - Compare responses to expected answers
-   - Identify failures and root causes
-   - Propose improved LLM parser prompt
-
-#### Cycle 2+ (Refinement)
-1. **Step 1**: Update Search Index
-   - Apply previous cycle's proposed prompt
-   - Wait for index rebuild (can take up to 1 hour)
-   - Verify index is READY before proceeding
-2. **Step 2**: Test updated index
-   - Invoke prompts against all test questions
-   - Capture responses in Excel file
-3. **Step 3**: Analyze results with Gemini
-   - Compare to previous cycles
-   - Identify improvements or regressions
-   - Propose further prompt improvements (if needed)
-
-#### Completion Criteria
-
-The workflow stops when:
-- Gemini analysis returns `stage_status: "optimized"` (prompt is good enough)
-- Maximum cycles reached (default: 10, safety limit)
-- Critical error occurs (workflow stops immediately)
-
-### Job Lifecycle
-
-```
-User Creates Job
-    ↓
-Status: 'queued'
-    ↓
-Worker Picks Up Job
-    ↓
-Status: 'running' (with heartbeat updates)
-    ↓
-[If dyno restarts during execution]
-    ↓
-Status: 'interrupted' (with checkpoint saved)
-    ↓
-Worker Restarts → Detects Interrupted Job
-    ↓
-Resumes from Checkpoint
-    ↓
-Status: 'running' (continues)
-    ↓
-Workflow Completes
-    ↓
-Status: 'completed' or 'failed'
-```
-
-### Additional Requirements for Local Development
-
-If you're setting up locally for testing/development, you also need:
-
-1. **Python 3.8+**
-2. **Virtual Environment** (recommended)
-3. **PostgreSQL Database**:
-   - Option A: Use Heroku Postgres (get `DATABASE_URL` from Heroku)
-   - Option B: Set up local PostgreSQL instance
-
-## Configuration: YAML Input File
-
-The main configuration file is `inputs/prompt_optimization_input.yaml`. Key sections:
-
-### Salesforce Configuration
-
-```yaml
-configuration:
-  salesforce:
-    username: "your-username@salesforce.com"
-    password: "your-password"
-    instanceUrl: "https://yourinstance.my.salesforce.com"
-  
-  # Search Index ID (18-character Salesforce record ID)
-  searchIndexId: "18lHu000000CgpDIAS"
-  
-  # Prompt Template API Name (DeveloperName, not display name)
-  promptTemplateApiName: "Test_RAG_Optimization_SFR_v1"
-  
-  # Refinement stage (currently only "llm_parser" supported)
-  refinementStage: "llm_parser"
-```
-
-### Gemini Configuration
-
-```yaml
-configuration:
-  # Gemini model for analysis
-  geminiModel: "gemini-2.5-pro"  # Recommended: gemini-2.5-pro or gemini-2.5-flash
-  
-  # PDF directory for context (optional)
-  pdfDirectory: "prompt-optimization-solution/inputs/pdf"
-```
-
-### Playwright Configuration
-
-```yaml
-configuration:
-  # Browser automation settings
-  headless: false        # true for servers, false for local debugging
-  slowMo: 0             # Delay between actions (ms), 500 for debugging
-  takeScreenshots: false # Enable screenshot capture
-```
-
-### Test Questions
-
-```yaml
-questions:
-  - question: "What is the maximum capacity of the distribution section?"
-    expectedAnswer: "The distribution section has a maximum capacity of 400A."
-    category: "Technical Specifications"
-  # ... more questions
-```
-
-### Refinement Stage Configuration
-
-```yaml
-configuration:
-  refinementStages:
-    llm_parser:
-      description: "LLM Parser Prompt Optimization"
-      focus: |
-        Instructions for Gemini on what to optimize
-      rootCauseGuidance: |
-        How to analyze failures
-      modificationGuidance: |
-        How to improve the prompt
-```
-
-**See `inputs/prompt_optimization_input.yaml` for complete configuration options and examples.**
-
-## Local Development Setup
-
-> **Note**: This section is for **local testing and development only**. If you want to use the application, use the [deployed version](#-quick-start-using-the-deployed-application) instead.
-
-Local setup allows you to:
-- Test changes before deploying
-- Debug issues in a local environment
-- Develop new features
-- Run the application on your own infrastructure
-
-### 1. Clone Repository
-
-```bash
-cd "/Users/zwarshavsky/Documents/Custom_LWC_Org_SDO/Custom LWC Development SDO/prompt-optimization-solution"
-```
-
-### 2. Set Up Python Virtual Environment
+From repo root:
 
 ```bash
 cd scripts/python
 python3 -m venv venv
-source venv/bin/activate  # On macOS/Linux
-# OR
-venv\Scripts\activate  # On Windows
-```
-
-> **`temp/` is local-only (not in git)**  
-> Optional dev helpers live under `temp/` so they stay off the remote. After your venv exists, you can run **`bash temp/setup/verify_setup.sh`** from the repo root to sanity-check the venv and imports (create `temp/setup/` yourself if needed). Pre-push / Heroku smoke scripts are typically under **`temp/readiness/`**; multi-pipeline experiment tooling under **`temp/multi_pipeline_gemini_experiment/`**. Fresh clones won’t include these unless you copy them back in.
-
-### 3. Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-**Note**: This installs:
-- `streamlit` - Web framework
-- `playwright` - Browser automation
-- `google-generativeai` - Gemini AI client
-- `pandas`, `openpyxl` - Excel file handling
-- `psycopg2-binary` - PostgreSQL adapter
-- `requests`, `PyYAML` - HTTP and YAML parsing
-
-### 4. Install Playwright Browsers
-
-```bash
-playwright install chromium
-```
-
-### 5. Configure Environment
-
-**Option A: Use Heroku Postgres (Recommended for Testing)**
-
-```bash
-# Get DATABASE_URL from Heroku
-heroku config:get DATABASE_URL --app sf-rag-optimizer
-
-# Set locally
-export DATABASE_URL="postgresql://..."
-```
-
-**Option B: Use Local PostgreSQL**
-
-```bash
-# Create local database and set DATABASE_URL
-export DATABASE_URL="postgresql://user:password@localhost:5432/dbname"
-```
-
-### 6. Configure Gemini API Key
-
-Set environment variable or configure in `gemini_config.py`:
-
-```bash
-export GOOGLE_API_KEY="your-api-key"
-```
-
-### 7. Update YAML Configuration
-
-Edit `inputs/prompt_optimization_input.yaml`:
-- Set Salesforce credentials
-- Set Search Index ID
-- Set Prompt Template API Name
-- Configure test questions
-- Set Gemini model
-
-### 8. Run Locally
-
-**Option A: Run Web Application (Local Testing)**
-
-```bash
-cd scripts/python
 source venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+export GOOGLE_API_KEY="your-key"
+export DATABASE_URL="postgresql://user:pass@host:5432/db"
 streamlit run app.py
 ```
 
-Access at `http://localhost:8501`
-
-> **Note**: This runs a local instance for testing. For production use, use the [deployed application](https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/).
-
-**Option B: Run Worker Process**
+Worker process (separate terminal):
 
 ```bash
 cd scripts/python
 source venv/bin/activate
-export DATABASE_URL="your-database-url"
+export DATABASE_URL="postgresql://user:pass@host:5432/db"
 python worker.py
 ```
 
-**Option C: Run Workflow Directly (CLI)**
+Direct CLI run:
 
 ```bash
 cd scripts/python
@@ -567,213 +57,27 @@ source venv/bin/activate
 python main.py --yaml-input ../inputs/prompt_optimization_input.yaml
 ```
 
-## Deployment to Heroku
+## Heroku Notes
 
-> **Note**: The application is already deployed at [https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/](https://sf-rag-optimizer-e0ec0aab3edd.herokuapp.com/). This section is for deploying your own instance or updating the existing deployment.
-
-### 1. Prerequisites
-
-- Heroku account
-- Heroku CLI installed
-- Git repository initialized
-
-### 2. Create Heroku App
+- `Procfile` defines `web` and `worker`.
+- Set config vars at minimum:
+  - `GOOGLE_API_KEY`
+  - `DATABASE_URL` (from Heroku Postgres addon)
+- Deploy with your normal git push flow, then ensure worker is scaled:
 
 ```bash
-heroku create your-app-name
+heroku ps:scale worker=1 --app sf-rag-optimizer
 ```
 
-**Note**: The existing deployment uses the app name `sf-rag-optimizer`.
+## Repo Conventions
 
-### 3. Add Heroku Postgres
+- Put one-off utilities in `temp/`.
+- Keep `inputs/prompt_optimization_input.yaml` local only.
+- Keep `private/` and debug artifacts out of git.
 
-```bash
-heroku addons:create heroku-postgresql:essential-0
-```
+## Quick Troubleshooting
 
-### 4. Set Environment Variables
-
-```bash
-heroku config:set GOOGLE_API_KEY="your-gemini-api-key"
-```
-
-### 5. Deploy
-
-```bash
-git push heroku main
-```
-
-### 6. Scale Worker Dyno
-
-```bash
-heroku ps:scale worker=1
-```
-
-### 7. Monitor
-
-```bash
-# View web logs
-heroku logs --tail --dyno web
-
-# View worker logs
-heroku logs --tail --dyno worker
-
-# Check dyno status
-heroku ps
-```
-
-## How It Works
-
-### Step 1: Update Search Index (Cycle 2+)
-
-- Uses **Playwright** to automate browser interaction
-- Navigates to Search Index record page
-- Updates LLM parser prompt textarea
-- Submits changes and waits for index rebuild
-- Polls API until index status is `READY` (can take up to 1 hour)
-
-**Why Playwright?** The Search Index LLM parser prompt cannot be updated via REST API (PATCH/PUT methods don't work). UI automation is the only reliable method.
-
-### Step 2: Test Index & Invoke Prompts
-
-- Reads test questions from YAML configuration
-- For each question:
-  - Invokes Prompt Builder template via REST API
-  - Captures AI-generated response
-  - Stores question, response, and expected answer in Excel
-- Saves Excel file to database immediately after creation
-
-### Step 3: Analyze Results with Gemini
-
-- Uploads Excel file and PDF context to Gemini
-- Asks Gemini to:
-  - Compare responses to expected answers
-  - Identify failures and root causes
-  - Propose improved LLM parser prompt
-- Updates Excel with analysis results
-- Determines if prompt is `optimized` or `needs_improvement`
-
-### Iteration Logic
-
-- If `needs_improvement`: Start next cycle with proposed prompt
-- If `optimized`: Stop workflow, mark as completed
-- If error: Stop workflow, mark as failed
-
-## Database Schema
-
-The `runs` table stores:
-
-- `run_id`: Unique job identifier
-- `status`: `queued`, `running`, `interrupted`, `completed`, `failed`
-- `config`: YAML configuration (JSONB)
-- `progress`: Current cycle, step, status (JSONB)
-- `output_lines`: Live output log (JSONB array)
-- `results`: Final results (JSONB)
-- `excel_file_path`: Path to Excel file
-- `excel_file_content`: Excel file binary data (BYTEA)
-- `heartbeat_at`: Last activity timestamp
-- `checkpoint_info`: Resume checkpoint (cycle, step) (JSONB)
-- `started_at`, `completed_at`: Timestamps
-- `error`, `error_details`: Error information
-
-## Worker Dyno Architecture
-
-### Why Worker Dynos?
-
-Heroku dynos restart at least once every 24 hours. Long-running jobs (hours) need:
-- **Separation**: Web UI separate from job execution
-- **Resilience**: Jobs survive web dyno restarts
-- **Graceful Shutdown**: Save state before restart
-- **Automatic Resume**: Continue from checkpoint after restart
-
-### How It Works
-
-1. **Job Creation**: Web app creates job with status `'queued'`
-2. **Worker Polling**: Worker polls database every 5 seconds
-3. **Job Execution**: Worker picks up job, marks as `'running'`, executes workflow
-4. **Heartbeat Updates**: Workflow updates heartbeat every 30 seconds
-5. **Graceful Shutdown**: On SIGTERM, worker saves checkpoint and marks as `'interrupted'`
-6. **Automatic Resume**: On restart, worker detects `'interrupted'` jobs and resumes from checkpoint
-
-### Dead Job Detection
-
-- Jobs with status `'running'` and no heartbeat for > 2 minutes are marked as `'failed'`
-- **Note**: This threshold may need adjustment for very long operations (e.g., Step 1 index rebuild)
-
-## Troubleshooting
-
-### Job Stuck in "Running" Status
-
-- Check worker logs: `heroku logs --tail --dyno worker`
-- Verify worker dyno is running: `heroku ps`
-- Check database heartbeat: Query `runs` table for `heartbeat_at`
-
-### Excel File Not Showing
-
-- Excel files are saved to database after Step 2 and Step 3
-- Check database: `excel_file_content` column should have data
-- Verify job completed Step 2 or Step 3
-
-### Resume Not Working
-
-- Resume requires state files (stored in `app_data/state/`)
-- State files are on ephemeral filesystem (lost on dyno restart)
-- **Future**: Store state files in database for true resume capability
-
-### Playwright Browser Not Found
-
-- Ensure `.profile` script installs browsers on startup
-- Check Heroku logs for browser installation messages
-- Verify `playwright install chromium` runs successfully
-
-### Optional: Skip "Verify Your Identity" for Heroku automation user
-
-When the workflow runs on Heroku, Playwright logs in as a Salesforce user. If Salesforce shows the **Verify Your Identity** (email code) screen, no one is there to complete it, so the run can get stuck. To avoid that, the Salesforce user the Heroku app uses can be granted the system permission **Skip Device Activation at Login** via a permission set (you cannot edit the Partner User profile directly).
-
-**Steps**
-
-1. **Setup** → **Permission Sets** → **New**
-2. Name the permission set (e.g. "Skip device activation for Heroku automation")
-3. Open it → **System Permissions** → **Edit** → enable **Skip Device Activation at Login** → **Save**
-4. **Manage Assignments** → **Add Assignments** → select the user the Heroku app uses → **Assign**
-
-**Disclaimer:** Granting this permission reduces identity verification for that user (no device/email step at login). Use it only for the dedicated automation/service account used by the Heroku app. Do not assign it to regular end users. Restrict and monitor who has access to that automation user's credentials.
-
-## Future Enhancements
-
-### Immediate Roadmap
-
-1. **Prompt Builder Optimization**
-   - Optimize prompts from Prompt Builder (not just LLM parser)
-   - Similar iterative refinement process
-
-2. **Agentforce Agent Optimization**
-   - Optimize Agentforce agent configurations
-   - Test agent behavior and refine
-
-### Future Enhancements
-
-1. **New Search Index Creation**
-   - Create new search indexes with optimized configurations
-   - Test different chunking parameters
-
-2. **Additional Search Index Components**
-   - Optimize other search index settings beyond LLM parser
-   - Test different field configurations
-
-3. **State File Persistence**
-   - Store state files in database for true resume capability
-   - Enable resume even after dyno restarts
-
-4. **One-Off Dyno Architecture**
-   - Use one-off dynos instead of persistent worker
-   - Each job gets its own dyno (no forced restarts)
-
-## References
-
-- [Salesforce Data Cloud Connect REST API](https://developer.salesforce.com/docs/data/connectapi/overview)
-- [Einstein Prompt Builder Guide](https://developer.salesforce.com/docs/einstein/genai/guide/get-started-prompt-builder.html)
-- [Google Gemini API](https://ai.google.dev/docs)
-- [Heroku Postgres](https://devcenter.heroku.com/articles/heroku-postgresql)
-- [Playwright Documentation](https://playwright.dev/python/)
+- Job stuck in `running`: check worker logs and heartbeat updates.
+- Browser issues on server: verify Playwright Chromium install completed.
+- No output workbook: confirm run reached test/analysis step and DB write succeeded.
 
