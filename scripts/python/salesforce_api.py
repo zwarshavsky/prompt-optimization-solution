@@ -993,7 +993,8 @@ class SearchIndexAPI:
 
 
 def get_next_index_name(instance_url: str, access_token: str, base_name: str) -> str:
-    """Return next V{n} name using base_name prefix. Scans existing indexes matching {base_name}_V(\\d+)."""
+    """Return next V{n}_{timestamp} name using base_name prefix with timestamp for uniqueness."""
+    from datetime import datetime
     try:
         api = SearchIndexAPI(instance_url, access_token)
         details = api.list_indexes().get("semanticSearchDefinitionDetails") or []
@@ -1006,12 +1007,15 @@ def get_next_index_name(instance_url: str, access_token: str, base_name: str) ->
             if m:
                 versions.append(int(m.group(1)))
         next_v = max(versions) + 1 if versions else 2
-        result = f"{base_name}_V{next_v}"
+        # Add timestamp for uniqueness to avoid collisions
+        timestamp = datetime.now().strftime("%m%d_%H%M%S")
+        result = f"{base_name}_V{next_v}_{timestamp}"
         log_print(f"   [index-naming] prefix='{base_name}' found versions={sorted(versions)} → {result}")
         return result
     except Exception as e:
         log_print(f"   ⚠️ Could not list indexes for name: {e}")
-        return f"{base_name}_V2"
+        timestamp = datetime.now().strftime("%m%d_%H%M%S")
+        return f"{base_name}_V2_{timestamp}"
 
 
 def find_index_id_by_name(
