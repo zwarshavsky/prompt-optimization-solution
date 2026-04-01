@@ -75,6 +75,9 @@ inputs/*.txt
 
 # Temporary testing and development files (local-only; do not commit)
 temp/
+.tmp_debug/
+private/
+inputs/test*.yaml
 
 # Proposed/sensitive input variants (use prompt_optimization_input.yaml.template)
 inputs/prompt_optimization_input_proposed.yaml
