@@ -91,3 +91,7 @@ scripts/python/test_fixes.py
 /presentations/
 inputs/test_two_inputs.yaml
 heroku_streamlit_proof.png
+/pm-handoff
+/PRD
+scripts/python/heroku_after_pdfs.png
+*.png
